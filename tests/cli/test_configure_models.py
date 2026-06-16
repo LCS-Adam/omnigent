@@ -2048,21 +2048,17 @@ def test_cursor_set_api_key_non_crsr_declined_is_not_stored(isolated_config) -> 
 
 
 # ── Cursor SDK-extra install offer (the optional ``cursor`` extra) ───────────
-# ``cursor-sdk`` left the baseline deps for an OPTIONAL extra (parity with
-# antigravity/pi), so a user can paste a ``CURSOR_API_KEY`` and still have no
-# SDK. Setup must detect that and offer to install — exactly like antigravity
-# post-#322. These tests force detection absent (the SDK is actually present in
-# the test venv).
+# ``cursor-sdk`` is now an OPTIONAL extra, so a key can be set with no SDK and
+# setup must offer to install it (like antigravity post-#322). These tests force
+# detection absent (the SDK is actually present in the test venv).
 
 
 @pytest.fixture()
 def _cursor_sdk_absent(monkeypatch):
     """Force ``cursor-sdk`` detection to report missing.
 
-    Both ``_run_configure_harnesses_interactive`` (overview row) and
-    ``_manage_cursor_harness`` (drill-in) resolve ``cursor_sdk_installed`` from
-    the source module at call time, so patching the module attribute is seen by
-    both.
+    Both the overview row and the drill-in resolve ``cursor_sdk_installed`` from
+    the source module at call time, so patching the module attribute covers both.
 
     :param monkeypatch: Pytest monkeypatch fixture.
     """
@@ -2077,10 +2073,8 @@ def test_cursor_overview_surfaces_install_command_when_sdk_missing(
 ) -> None:
     """L1 overview: the Cursor row names the extra install command when absent.
 
-    Parallel to Antigravity post-#322 and the CLI harnesses' "not installed —
-    open to install" sub-line. The exact ``pip install "omnigent[cursor]"`` is
-    shown (escaped so the literal brackets render). Without the SDK-detection
-    branch this line never appears.
+    The exact ``pip install "omnigent[cursor]"`` is shown (escaped so the
+    literal brackets render).
     """
     result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input="q\n")
     assert result.exit_code == 0, result.output
@@ -2095,9 +2089,8 @@ def test_cursor_drillin_offers_install_when_sdk_missing(
 ) -> None:
     """Drilling into Cursor with the SDK absent presents the install offer.
 
-    The three-choice offer (install / set key anyway / show command) appears on
-    entry. Here the user picks "show the command" (choice 3), which prints the
-    command and falls through to the key menu, then backs out.
+    Here the user picks "show the command" (choice 3), which prints it and falls
+    through to the key menu, then backs out.
     """
     # L1 4=Cursor → install offer 3=show command → key menu q=back → L1 q.
     stdin = "\n".join(["4", "3", "q", "q"]) + "\n"
@@ -2111,11 +2104,9 @@ def test_cursor_drillin_offers_install_when_sdk_missing(
 def test_cursor_key_settable_when_sdk_missing(isolated_config, _cursor_sdk_absent) -> None:
     """The Cursor key is still storable when the SDK is absent (no hard block).
 
-    This is the deliberate divergence from pi: the ``cursor:`` key is independent
-    of the SDK and useful the moment it's installed, so the drill-in offers the
-    install but does NOT gate key management on it. The user declines the install
-    ("set the key anyway" = choice 2), then sets the key — which must persist
-    exactly as it does with the SDK present.
+    The deliberate divergence from pi: the drill-in offers the install but does
+    NOT gate key management on it. Here the user declines ("set the key anyway" =
+    choice 2), then sets the key — which must persist as it does with the SDK.
     """
     # L1 4=Cursor → install offer 2=set key anyway → key menu 1=Set →
     # paste crsr_ key → key menu q=back → L1 q=quit.
@@ -2133,9 +2124,8 @@ def test_cursor_install_now_invokes_runner_without_index(
 ) -> None:
     """Choosing "install it now" shells the install with ``omnigent[cursor]``.
 
-    Mocks the subprocess (never really installs) and asserts the argv targets the
-    extra and carries NO hardcoded index URL / proxy — pip/uv inherit the user's
-    own config. Forces the ``uv``-absent path for a deterministic argv.
+    Mocks the subprocess and asserts the argv targets the extra and carries NO
+    hardcoded index URL / proxy. Forces the ``uv``-absent path for determinism.
     """
     import subprocess
 

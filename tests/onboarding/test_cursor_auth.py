@@ -113,8 +113,8 @@ def test_settings_shape() -> None:
 
 
 # ── SDK-extra detection + install (the optional ``cursor`` extra) ─────────────
-# ``cursor-sdk`` left the baseline deps for an OPTIONAL extra (parity with
-# antigravity/pi), so setup must detect a missing SDK and offer to install it.
+# ``cursor-sdk`` is now an OPTIONAL extra, so setup must detect a missing SDK
+# and offer to install it.
 
 
 def test_cursor_sdk_installed_true_when_spec_found(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,9 +138,8 @@ def test_cursor_sdk_installed_false_when_module_not_found(
 ) -> None:
     """A ``ModuleNotFoundError`` from ``find_spec`` reads as not-installed.
 
-    ``find_spec`` can *raise* (rather than return ``None``) when a parent
-    package is absent. The guard must swallow that and report not-installed
-    (not crash setup).
+    ``find_spec`` can raise (not return ``None``) when a parent package is
+    absent; the guard must swallow that rather than crash setup.
     """
 
     def _raise(name: str) -> object:

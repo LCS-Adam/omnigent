@@ -7934,26 +7934,18 @@ def _manage_harness_providers(family: str) -> None:
 def _prompt_install_cursor() -> str | None:
     """Offer to install the missing ``cursor`` extra; return a status line.
 
-    Shown at the top of the Cursor drill-in when the ``cursor-sdk`` SDK is
-    absent (it ships in an OPTIONAL pip extra, so a user can have a
-    ``CURSOR_API_KEY`` configured and still no SDK to run the harness). Mirrors
-    the shape of :func:`_prompt_install_antigravity` / :func:`_prompt_install_harness`
-    — a three-choice ``select``: install it now, set the key anyway, or print
-    the command — but with one deliberate difference: it does NOT gate key
-    management on the SDK. Pi can't configure its credentials without its CLI,
-    so ``_prompt_install_harness`` returns the user to the picker on decline;
-    here the ``cursor:`` key is stored independently of the SDK and is useful
-    the moment the SDK lands, so declining just falls through to the key menu.
+    Shown atop the Cursor drill-in when the optional-extra ``cursor-sdk`` is
+    absent. Three-choice ``select`` like :func:`_prompt_install_antigravity` /
+    :func:`_prompt_install_harness` (install now / set key anyway / show
+    command), but does NOT gate key management on the SDK: the ``cursor:`` key
+    is stored independently and is useful once the SDK lands, so declining falls
+    through to the key menu (whereas ``_prompt_install_harness`` returns to the
+    picker, since pi can't configure credentials without its CLI). Install is
+    portable and index-free — see
+    :func:`omnigent.onboarding.cursor_auth.cursor_install_command`.
 
-    The install runs via the safest portable mechanism (``uv pip install`` when
-    ``uv`` is present, else this interpreter's pip) and carries no index URL —
-    see :func:`omnigent.onboarding.cursor_auth.cursor_install_command`. On
-    failure it prints the command to run by hand, exactly like the CLI-harness
-    install offer.
-
-    :returns: A status string to show as the drill-in's transient status (the
-        install result, or the printed-command note), or ``None`` when the user
-        chose to set the key anyway / Esc'd without an actionable result.
+    :returns: Status string for the drill-in's transient status line, or
+        ``None`` (set-key-anyway / Esc / printed-command, no actionable result).
     """
     from rich.markup import escape as _rich_escape
 
@@ -7964,8 +7956,8 @@ def _prompt_install_cursor() -> str | None:
     from omnigent.onboarding.interactive import console, select
 
     cmd = CURSOR_EXTRA_INSTALL_COMMAND
-    # ``select`` renders option/description text through Rich markup, so the
-    # literal ``[cursor]`` in the command must be escaped to render verbatim.
+    # ``select`` renders text through Rich markup; escape the literal
+    # ``[cursor]`` so it renders verbatim.
     cmd_markup = _rich_escape(cmd)
     choice = select(
         "Cursor's SDK (cursor-sdk) isn't installed. Install it now?",
@@ -8007,12 +7999,10 @@ def _manage_cursor_harness() -> None:
     harnesses persist their api keys (the secret in the store, a
     ``keychain:``/``env:`` reference in ``~/.omnigent/config.yaml``).
 
-    When the optional ``cursor-sdk`` SDK is missing, the drill-in first offers
-    to install it (:func:`_prompt_install_cursor`). Unlike the CLI-backed
-    harnesses — whose drill-in *gates* on the CLI because pi/Claude/Codex can't
-    be configured without it — declining here still drops into the key menu: the
-    ``cursor:`` key is independently storable and is useful the moment the SDK is
-    installed. Mirrors Antigravity's post-#322 behavior.
+    When the optional ``cursor-sdk`` is missing, the drill-in first offers to
+    install it (:func:`_prompt_install_cursor`). Unlike the CLI-backed harnesses
+    (which gate on the CLI), declining still drops into the key menu — the
+    ``cursor:`` key is independently storable. Mirrors Antigravity post-#322.
 
     :returns: None. Side effects: may install the ``cursor`` extra, and may
         write the ``cursor:`` block of ``~/.omnigent/config.yaml`` and the
@@ -8026,10 +8016,9 @@ def _manage_cursor_harness() -> None:
     )
     from omnigent.onboarding.interactive import select
 
-    # Offer the install once, on entry, when the SDK is absent — not on every
-    # loop iteration (that would re-prompt after each key action). The returned
-    # status seeds the menu's transient status line; declining falls through to
-    # key management rather than returning, since the key is SDK-independent.
+    # Offer the install once on entry (not per loop iteration) when the SDK is
+    # absent; the result seeds the menu's status line. Declining falls through
+    # to key management, since the key is SDK-independent.
     status: str | None = None
     if not cursor_sdk_installed():
         status = _prompt_install_cursor()
@@ -8593,14 +8582,11 @@ def _run_configure_harnesses_interactive() -> None:
         options.append(f"{'  ' if cursor_key_set else '[red]✗[/] '}Cursor")
         selectable.append(True)
         row_target.append(CURSOR_KEY)
-        # ``cursor-sdk`` now ships in an OPTIONAL extra (it left the baseline
-        # deps), so a user can have a key configured and still no SDK to run the
-        # harness. Lead with that gap when the extra is missing — naming the
-        # exact install command inline (parallel to Antigravity post-#322 and the
-        # CLI harnesses' "open to install" hint) — then still report the key
-        # status, since the key is independently storable and useful once the SDK
-        # is installed. The literal ``[cursor]`` is escaped: the menu renders
-        # sub-lines through Rich markup, where bare brackets would parse as a tag.
+        # ``cursor-sdk`` now ships in an OPTIONAL extra, so the key can be set
+        # with no SDK present. When the extra is missing, lead with that gap and
+        # the install command (parallel to Antigravity post-#322), then still
+        # report key status. ``[cursor]`` is escaped — sub-lines render through
+        # Rich markup, where bare brackets parse as a tag.
         cursor_sub_lines: list[str] = []
         if not cursor_sdk_installed():
             from rich.markup import escape as _rich_escape

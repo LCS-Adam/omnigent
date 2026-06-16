@@ -126,11 +126,10 @@ agents-sdk = [
 # harness module imports the SDK lazily on first turn, so only users of the
 # harness need this extra. Early SDK (v0.1.x) — pin minor.
 antigravity = ["google-antigravity>=0.1,<1"]
-# Cursor SDK harness (`harness: cursor`). Optional, like the antigravity
-# extra: the harness drives the cursor-sdk (custom_tools tool bridge over a
-# local bridge) and imports it lazily on first turn, so only users of
-# `--harness cursor` need this extra (`omnigent[cursor]`). It was previously a
-# baseline dependency; it is now opt-in to keep the default install lean.
+# Cursor SDK harness (`harness: cursor`). Optional like antigravity: the
+# harness imports the cursor-sdk lazily on first turn, so only `--harness
+# cursor` users need this extra (`omnigent[cursor]`). Was a baseline dependency;
+# now opt-in to keep the default install lean.
 cursor = ["cursor-sdk>=0.1.7"]
 databricks = [
     # Floor matches what core code was tested against when the SDK was a
