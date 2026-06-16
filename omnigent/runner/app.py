@@ -6728,8 +6728,6 @@ def create_runner_app(
             204 if no live codex terminal is registered for the session.
             503 if the tmux send-keys invocation fails.
         """
-        from omnigent.claude_native_bridge import _run_tmux
-
         registry = resource_registry.terminal_registry
         instance = registry.get(conv_id, "codex", "main") if registry is not None else None
         if instance is None or not instance.running:
