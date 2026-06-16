@@ -15,6 +15,17 @@ name: Security Gate
 
 on:
   workflow_call:
+    inputs:
+      fail_closed:
+        description: >-
+          When the Security Scan check does not conclude in time, fail the gate
+          (block the caller) instead of proceeding fail-open. Default false
+          (CI workflows fail-open -- a fork `pull_request` run has no secrets);
+          the fork-e2e mirror sets this true because it runs PR code WITH the
+          gateway secret.
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -54,6 +65,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          FAIL_CLOSED: ${{ inputs.fail_closed }}
         run: |
           echo "Untrusted PR -- waiting for the single 'Security Scan' check on $HEAD_SHA"
           q='[.check_runs[] | select(.name=="Security Scan")] | sort_by(.started_at) | last'
@@ -70,6 +82,10 @@ jobs:
             sleep 5
           done
           if [ -z "$conclusion" ]; then
+            if [ "$FAIL_CLOSED" = "true" ]; then
+              echo "::error::Security Scan check did not complete in time; failing closed (caller runs PR code with secrets)."
+              exit 1
+            fi
             echo "::warning::Security Scan check did not complete in time; proceeding (fail-open)."
             exit 0
           fi
