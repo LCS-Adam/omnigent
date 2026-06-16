@@ -25,7 +25,9 @@ def parse(name):
 
 
 def main():
-    pairs = [(v, t.strip()) for t in os.environ.get("ALL_TAGS", "").splitlines() if (v := parse(t))]
+    pairs = [
+        (v, t.strip()) for t in os.environ.get("ALL_TAGS", "").splitlines() if (v := parse(t))
+    ]
     if not pairs:
         print("- -")
         return
