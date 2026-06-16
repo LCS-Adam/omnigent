@@ -17,7 +17,7 @@ build``; see deploy/e2b/README.md) to smoke the real host template too.
 
     pip install 'omnigent[e2b]'
     export E2B_API_KEY=e2b_...
-    python tests/e2e/integrations/deploy/e2b/smoke_test.py [--template NAME] [--keep]
+    python tests/e2e/integrations/deploy/e2b/e2b_smoke_test.py [--template NAME] [--keep]
 
 Exit code 0 = every primitive worked; 1 = a check failed; 2 = setup error.
 """

@@ -674,15 +674,15 @@ def test_kind_glyph_uniform_display_width(kind: str) -> None:
 
     Proves the "ticket looks cramped" fix comes from the subscription
     glyph's VARIATION SELECTOR-16 (which makes ADMISSION TICKETS a 2-cell
-    emoji like 🔑 / 🌐 / 🧱), not ad-hoc padding. Width is measured the way
-    the banner box measures it — ``cell_len`` plus one cell per VS16 —
-    because ``rich.cells.cell_len`` itself under-counts a VS16 emoji as 1
-    cell. A regression that dropped the VS16 (or a glyph) yields width != 2.
+    emoji like 🔑 / 🌐 / 🧱), not ad-hoc padding. Width is measured via the
+    banner box's own ``_display_width`` (rich >= 14 ``cell_len``, which counts
+    a VS16-forced wide emoji as the two cells terminals render). A regression
+    that dropped the VS16 (or a glyph) yields width != 2.
     """
-    from rich.cells import cell_len
+    from omnigent.inner.banner import _display_width
 
     g = kind_glyph(kind)
-    width = cell_len(g) + g.count("\ufe0f")
+    width = _display_width(g)
     assert width == 2, f"glyph for {kind!r} should be 2 display cells; got {width} ({g!r})."
 
 
