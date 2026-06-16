@@ -5,15 +5,16 @@ name: Fork e2e mirror
 # git-ref update via a GitHub App token (refs pushed by the default GITHUB_TOKEN
 # don't trigger workflows); it never checks out or runs fork code. Gated by
 # should-mirror.sh + the single contributor Security Scan, consulted through the
-# reusable security-gate.yml. pull_request_review is included so a maintainer's
-# approval mirrors immediately, not only on the PR's next push.
+# reusable security-gate.yml. To mirror a held first-time-contributor PR a
+# maintainer applies the `e2e-approved` label: that fires pull_request_target
+# (labeled), which -- unlike pull_request_review on a fork PR -- carries the
+# secrets the mirror needs to mint its App token. (pull_request_review can't:
+# on a fork PR it gets only a read-only GITHUB_TOKEN, no secrets/vars.)
 #
 # leak-scan-allow: pull_request_target
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, closed]
-  pull_request_review:
-    types: [submitted]
+    types: [opened, synchronize, reopened, closed, labeled]
 
 permissions:
   contents: read
