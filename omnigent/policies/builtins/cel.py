@@ -129,54 +129,58 @@ def cel_policy(
 
 # ── Registry ─────────────────────────────────────────────────────────────────
 
-POLICY_REGISTRY: list[dict[str, Any]] = [] if _cel is None else [
-    {
-        "handler": "omnigent.policies.builtins.cel.cel_policy",
-        "kind": "factory",
-        "name": "CEL Expression Policy",
-        "description": (
-            "Evaluate a CEL (Common Expression Language) expression against "
-            "every policy event. The expression receives the full event as "
-            '`event` and must return a map with `result` ("DENY", "ASK", or '
-            '"ALLOW") and optional `reason` keys. '
-            "CEL is non-Turing-complete and side-effect-free."
-        ),
-        "params_schema": {
-            "type": "object",
-            "properties": {
-                "expression": {
-                    "type": "string",
-                    "description": (
-                        "CEL expression. The `event` variable holds the PolicyEvent dict. "
-                        "Must return a map: "
-                        '{"result": "DENY"|"ASK"|"ALLOW", "reason": "..."}. '
-                        "Event fields: "
-                        'event.type ("request"|"tool_call"|"tool_result"|'
-                        '"response"|"llm_request"|"llm_response"|"output_logged"); '
-                        "event.target (tool name on tool_call/tool_result, null otherwise); "
-                        "event.data (phase-specific: string for request/response, "
-                        '{"name": str, "arguments": map} for tool_call, '
-                        '{"result": any} for tool_result, '
-                        '{"model": str, "messages_count": int, "tools_count": int,'
-                        ' "system_prompt_preview": str, "last_user_message": str}'
-                        " for llm_request); "
-                        "event.context.actor.run_as (user email); "
-                        "event.context.usage.total_cost_usd (session spend). "
-                        "Example: "
-                        'event.type == "tool_call" && event.data.name == "sys_os_shell" '
-                        '? {"result": "DENY", "reason": "Shell blocked."} '
-                        ': {"result": "ALLOW"}'
-                    ),
+POLICY_REGISTRY: list[dict[str, Any]] = (
+    []
+    if _cel is None
+    else [
+        {
+            "handler": "omnigent.policies.builtins.cel.cel_policy",
+            "kind": "factory",
+            "name": "CEL Expression Policy",
+            "description": (
+                "Evaluate a CEL (Common Expression Language) expression against "
+                "every policy event. The expression receives the full event as "
+                '`event` and must return a map with `result` ("DENY", "ASK", or '
+                '"ALLOW") and optional `reason` keys. '
+                "CEL is non-Turing-complete and side-effect-free."
+            ),
+            "params_schema": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": (
+                            "CEL expression. The `event` variable holds the PolicyEvent dict. "
+                            "Must return a map: "
+                            '{"result": "DENY"|"ASK"|"ALLOW", "reason": "..."}. '
+                            "Event fields: "
+                            'event.type ("request"|"tool_call"|"tool_result"|'
+                            '"response"|"llm_request"|"llm_response"|"output_logged"); '
+                            "event.target (tool name on tool_call/tool_result, null otherwise); "
+                            "event.data (phase-specific: string for request/response, "
+                            '{"name": str, "arguments": map} for tool_call, '
+                            '{"result": any} for tool_result, '
+                            '{"model": str, "messages_count": int, "tools_count": int,'
+                            ' "system_prompt_preview": str, "last_user_message": str}'
+                            " for llm_request); "
+                            "event.context.actor.run_as (user email); "
+                            "event.context.usage.total_cost_usd (session spend). "
+                            "Example: "
+                            'event.type == "tool_call" && event.data.name == "sys_os_shell" '
+                            '? {"result": "DENY", "reason": "Shell blocked."} '
+                            ': {"result": "ALLOW"}'
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Fallback reason for DENY/ASK when the map omits a reason key."
+                        ),
+                        "default": "Denied by policy.",
+                    },
                 },
-                "reason": {
-                    "type": "string",
-                    "description": (
-                        "Fallback reason for DENY/ASK when the map omits a reason key."
-                    ),
-                    "default": "Denied by policy.",
-                },
+                "required": ["expression"],
             },
-            "required": ["expression"],
         },
-    },
-]
+    ]
+)
