@@ -385,3 +385,26 @@ def test_load_omnigent_yaml_threads_executor_extra_max_tokens_to_llm_extra(
 
     assert spec.llm is not None
     assert spec.llm.extra["max_tokens"] == 65536
+
+
+def test_claude_coder_sandbox_fixture_requests_workspace_only_sandbox() -> None:
+    """
+    The Claude sandbox e2e fixture must explicitly request an active
+    platform sandbox and grant writes only to the conversation workspace.
+
+    What breaks if this fails: the outside-workspace e2es can pass or fail
+    based on Claude Code's unsandboxed native-tool behavior instead of the
+    Omnigent ``os_env`` contract they are supposed to cover.
+    """
+    spec = load_omnigent_yaml(
+        Path("tests/resources/agents/claude-coder-sandbox/claude-coder-sandbox.yaml")
+    )
+
+    assert spec.name == "claude-coder-sandbox"
+    assert spec.os_env is not None
+    assert spec.os_env.cwd == "."
+    assert spec.os_env.sandbox is not None
+    assert spec.os_env.sandbox.type in {"linux_bwrap", "darwin_seatbelt", "none"}
+    assert spec.os_env.sandbox.type != "none"
+    assert spec.os_env.sandbox.write_paths == ["."]
+    assert spec.os_env.sandbox.read_paths is None

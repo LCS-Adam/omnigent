@@ -64,8 +64,8 @@ def test_pip_install_and_use_package(
     live_runner_id: str,
 ) -> None:
     """
-    The agent installs a PyPI package via ``pip install`` in the
-    sandbox and uses it in a subsequent Python command.
+    The agent installs a PyPI package via ``pip`` in the sandbox and
+    uses it in a subsequent Python command.
 
     Uses ``cowsay`` — a tiny package with no C dependencies that
     installs in <2 seconds.
@@ -81,10 +81,13 @@ def test_pip_install_and_use_package(
         http_client,
         session_id=session_id,
         content=(
-            "Use the sys_os_shell tool to: "
-            "1) pip install cowsay "
-            "2) Run: python -c \"import cowsay; cowsay.cow('hello from omnigent')\" "
-            "Show me the output."
+            "Use the sys_os_shell tool to run these commands in order. "
+            "Do not skip steps or use other install methods.\n"
+            "1) `python -m ensurepip --upgrade`\n"
+            "2) `python -m pip install cowsay --target ./_sandbox_pip_cowsay`\n"
+            "3) `PYTHONPATH=./_sandbox_pip_cowsay python -c "
+            "\"import cowsay; cowsay.cow('hello from omnigent')\"`\n"
+            "Show me the cow ASCII art output."
         ),
     )
 
@@ -102,10 +105,9 @@ def test_pip_install_and_use_package(
         "The agent may not have used the sandbox tool."
     )
 
-    # The cowsay ASCII art must appear in the output — proves the
-    # package was installed AND executed successfully. If pip fails
-    # (SSL, network, etc.), the test fails — that's a broken
-    # environment, not something to handle gracefully.
+    # The cowsay ASCII art must appear in the output — proves pip was
+    # bootstrapped when absent, the package installed into the workspace,
+    # and the package executed successfully.
     text = _extract_all_text(body)
     all_output = " ".join(
         str(it.get("output", ""))

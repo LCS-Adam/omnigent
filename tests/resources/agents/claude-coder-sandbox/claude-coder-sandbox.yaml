@@ -1,0 +1,30 @@
+name: claude-coder-sandbox
+description: Claude SDK coding assistant with workspace-scoped native tools for sandbox e2e tests.
+
+executor:
+  harness: claude-sdk
+  model: claude-sonnet-4-20250514
+
+prompt: |
+  You are a coding assistant running in a workspace sandbox. Use the requested
+  file or shell tool exactly, then summarize the observed result concisely.
+
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox:
+    # Let the parser choose the active backend for the CI host:
+    # linux_bwrap on Linux with bwrap, darwin_seatbelt on macOS.
+    # The workspace must be writable so the positive inside-workspace
+    # test exercises real native file operations.
+    write_paths: ["."]
+
+tools:
+  reviewer:
+    type: agent
+    description: Reviews code for bugs, security issues, and quality problems.
+    executor:
+      harness: claude-sdk
+      model: claude-sonnet-4-20250514
+    prompt: |
+      You are a code reviewer. Be specific and concise.

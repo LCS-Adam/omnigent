@@ -92,6 +92,9 @@ _DATABRICKS_MODEL_MAP: dict[str, str] = {
 # spawning, terminal hierarchies, etc.) and have no docs pointing
 # at them from elsewhere in the repo.
 _CLAUDE_CODER_DIR = _REPO_ROOT / "tests" / "resources" / "agents" / "claude-coder"
+_CLAUDE_CODER_SANDBOX_DIR = (
+    _REPO_ROOT / "tests" / "resources" / "agents" / "claude-coder-sandbox"
+)
 _OPENAI_CODER_DIR = _REPO_ROOT / "tests" / "resources" / "examples" / "openai-coder"
 _SYS_TERMINAL_TEST_DIR = _REPO_ROOT / "tests" / "resources" / "agents" / "sys-terminal-test"
 # A plain claude-sdk chat agent seeded as a BUILT-IN (via the server's
@@ -790,6 +793,28 @@ def claude_coder_agent(http_client: httpx.Client, databricks_workspace_host: str
     return upload_agent(
         http_client,
         _CLAUDE_CODER_DIR,
+        rewrite_model_for_databricks=databricks_workspace_host is not None,
+    )
+
+
+@pytest.fixture(scope="session")
+def claude_coder_sandbox_agent(
+    http_client: httpx.Client, databricks_workspace_host: str | None
+) -> str:
+    """
+    Upload the Claude SDK coder agent that declares an active ``os_env`` sandbox.
+
+    The generic ``claude_coder_agent`` intentionally has no ``os_env`` so most
+    Claude SDK e2es exercise the default native CLI behavior. Workspace
+    enforcement tests need the opposite: a fixture whose spec requests the
+    platform sandbox and grants writes only inside the conversation workspace.
+
+    :param http_client: HTTP client pointed at the server.
+    :returns: The agent name, ``"claude-coder-sandbox"``.
+    """
+    return upload_agent(
+        http_client,
+        _CLAUDE_CODER_SANDBOX_DIR,
         rewrite_model_for_databricks=databricks_workspace_host is not None,
     )
 
