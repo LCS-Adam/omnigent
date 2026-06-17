@@ -828,6 +828,10 @@ skips:
     cluster: sandbox-deps-env
     mode: skip
 
+  # Cluster: databricks_supervisor harness parametrizations broken
+  # across multiple unrelated test files (yaml hello world, real
+  # hello world, coding supervisor with forks). Likely a single
+  # gateway-routing or supervisor-harness regression.
   - id: tests/e2e/omnigent/test_example_coding_supervisor_with_forks.py::test_coding_supervisor_with_forks_one_shot[databricks_supervisor]
     reason: "Force-merge backlog (databricks_supervisor harness cluster). First observed failing at 305e9bb9 (2026-05-23T06:06:59Z, E2E)."
     issue: 0
