@@ -1,14 +1,10 @@
-"""E2E test: markdown file attachment.
+"""E2E tests: file tools and markdown attachment.
 
-Verifies the full pipeline: file upload → input_file content block →
-content resolution (MIME type from filename) → LLM receives the file
-and produces a response. Runs against the mock LLM server.
-
-The ``list_files`` and ``download_file`` tool tests that were here
-previously require spec-level ``tools.builtins`` declarations which
-the omnigent single-file YAML format does not support. They remain
-in the real-LLM e2e suite (``tests/e2e/test_file_tools.py`` on the
-``e2e.yml`` workflow with ``--llm-api-key``).
+``test_markdown_file_attachment`` runs against the mock LLM server.
+``test_list_files_finds_uploaded_file`` and
+``test_download_file_retrieves_content`` require a real LLM (the
+bundled archer agent declares ``tools.builtins`` which the omnigent
+single-file YAML format does not support for inline agents).
 
 Usage::
 
@@ -112,3 +108,119 @@ def test_markdown_file_attachment(
     )
     text = _extract_all_text(body)
     assert text.strip(), f"Agent produced no text. Output: {body.get('output', [])}"
+
+
+# ── Real-LLM tests (require archer_agent with tools.builtins) ──
+
+
+def _has_tool_call(body: dict[str, Any], name: str) -> bool:
+    """Check if a function_call with the given name exists in output."""
+    return any(
+        (i.get("type") == "function_call" and i.get("name") == name)
+        or (i.get("event_type") == "tool_call" and i.get("tool_name") == name)
+        for i in body.get("output", [])
+    )
+
+
+def _tool_outputs(body: dict[str, Any], name: str) -> list[str]:
+    """Return outputs for completed tool calls named *name*."""
+    call_ids = {
+        item["call_id"]
+        for item in body.get("output", [])
+        if item.get("type") == "function_call" and item.get("name") == name
+    }
+    return [
+        item["output"]
+        for item in body.get("output", [])
+        if item.get("type") == "function_call_output"
+        and item.get("call_id") in call_ids
+        and item.get("output", "").strip()
+    ]
+
+
+def test_list_files_finds_uploaded_file(
+    http_client: httpx.Client,
+    archer_agent: str,
+    live_runner_id: str,
+    using_mock_llm: bool,
+) -> None:
+    """A session-uploaded file is visible to list_files.
+
+    Requires real LLM — archer agent with ``tools.builtins``.
+    """
+    if using_mock_llm:
+        pytest.skip("requires real LLM (spec-level builtin tools)")
+
+    session_id = create_runner_bound_session(
+        http_client, agent_name=archer_agent, runner_id=live_runner_id
+    )
+
+    upload_resp = http_client.post(
+        f"/v1/sessions/{session_id}/resources/files",
+        files={"file": ("test_data.txt", b"Hello from omnigent", "text/plain")},
+    )
+    upload_resp.raise_for_status()
+
+    rid = send_user_message_to_session(
+        http_client,
+        session_id=session_id,
+        content=(
+            "Use the list_files tool to show me all uploaded "
+            "files. Only use list_files, nothing else."
+        ),
+    )
+    body = poll_session_until_terminal(
+        http_client, session_id=session_id, response_id=rid, timeout=180
+    )
+    assert body["status"] == "completed", f"Turn failed: {body.get('error')}"
+
+    assert _has_tool_call(body, "list_files"), "Agent didn't call list_files"
+    assert any("test_data.txt" in output for output in _tool_outputs(body, "list_files")), (
+        f"list_files didn't return uploaded file. Output: {body.get('output', [])}"
+    )
+
+
+def test_download_file_retrieves_content(
+    http_client: httpx.Client,
+    archer_agent: str,
+    live_runner_id: str,
+    using_mock_llm: bool,
+) -> None:
+    """download_file retrieves a session-uploaded file by ID.
+
+    Requires real LLM — archer agent with ``tools.builtins``.
+    """
+    if using_mock_llm:
+        pytest.skip("requires real LLM (spec-level builtin tools)")
+
+    session_id = create_runner_bound_session(
+        http_client, agent_name=archer_agent, runner_id=live_runner_id
+    )
+
+    upload_resp = http_client.post(
+        f"/v1/sessions/{session_id}/resources/files",
+        files={"file": ("greeting.txt", b"HELLO_WORLD", "text/plain")},
+    )
+    upload_resp.raise_for_status()
+    file_id = upload_resp.json()["id"]
+
+    rid = send_user_message_to_session(
+        http_client,
+        session_id=session_id,
+        content=(
+            f"Use download_file with file_id {file_id}. Do not call "
+            "sys_os_shell, sys_os_read, or any other filesystem tool. "
+            "Report the JSON result."
+        ),
+    )
+    body = poll_session_until_terminal(
+        http_client, session_id=session_id, response_id=rid, timeout=180
+    )
+    assert body["status"] == "completed", f"Turn failed: {body.get('error')}"
+
+    assert _has_tool_call(body, "download_file"), "Agent didn't call download_file"
+    outputs = _tool_outputs(body, "download_file")
+    assert outputs, f"download_file returned no tool output. Output: {body.get('output', [])}"
+    assert any("HELLO_WORLD" in output for output in outputs), (
+        f"download_file didn't return expected content. Tool outputs: {outputs}"
+    )
