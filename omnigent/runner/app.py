@@ -4625,8 +4625,12 @@ def create_runner_app(
             )
         return "\n".join(parts)
 
-    def _release_failed_required_terminal_session(session_id: str) -> None:
-        """Release the harness subprocess for a session whose runtime died."""
+    def _release_required_terminal_session(session_id: str) -> None:
+        """Release the harness subprocess after its required terminal exited.
+
+        Pure subprocess cleanup — publishes no ``failed`` lifecycle events, so
+        it is safe on both the crash and the clean-shutdown paths.
+        """
         if process_manager is None:
             return
 
@@ -4665,7 +4669,7 @@ def create_runner_app(
         # cleanly, so don't flip the chat to ``failed`` (the spurious-"failed"
         # bug). Still release the harness; liveness surfaces the offline runner.
         if event.session_was_idle:
-            _release_failed_required_terminal_session(event.session_id)
+            _release_required_terminal_session(event.session_id)
             return
 
         output = _format_required_terminal_exit_output(event)
@@ -4685,7 +4689,7 @@ def create_runner_app(
             status="failed",
             output=output,
         )
-        _release_failed_required_terminal_session(event.session_id)
+        _release_required_terminal_session(event.session_id)
 
     resource_registry.set_terminal_exit_publisher(_publish_terminal_exit)
 
@@ -9663,6 +9667,13 @@ def create_runner_app(
                 )
             message_body = dict(body)
             message_body["conversation_id"] = conversation_id
+
+            # A new message means a turn is (about to be) in flight. Mark the
+            # native session running now so a pane crash before the PTY
+            # watcher's first ``running`` edge isn't misread as a clean
+            # shutdown against the prior turn's stale ``idle`` memo.
+            if _is_native_harness(conversation_id):
+                resource_registry.note_session_turn_started(conversation_id)
 
             # Take an arrival slot, then wait at the FIFO gate so this
             # conversation's messages reach the turn-vs-buffer decision in

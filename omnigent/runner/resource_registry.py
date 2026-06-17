@@ -271,10 +271,11 @@ class SessionResourceRegistry:
         # → running / ``Stop`` → idle bracketing. Set by the runner via
         # :meth:`set_session_status_publisher`.
         self._session_status_publisher: Callable[[str, str], None] | None = None
-        # Latest PTY-derived status (running/idle) per session, set by the
-        # native agent watcher. Lets :meth:`_handle_terminal_exit` tell a clean
-        # shutdown (idle) from a mid-turn crash. Written from the watcher thread;
-        # a single-key str assignment is atomic under the GIL, so no lock.
+        # Latest PTY-derived status (running/idle) per session. Lets
+        # :meth:`_handle_terminal_exit` tell a clean shutdown (idle) from a
+        # mid-turn crash. Written from the watcher thread and the turn-start
+        # hook; all access goes through the ``_*_session_status_memo`` helpers
+        # under ``self._lock``.
         self._last_session_status: dict[str, str] = {}
         # Optional callback invoked on the event loop when a watched terminal
         # disappears unexpectedly. The callback receives the terminal's
@@ -337,6 +338,28 @@ class SessionResourceRegistry:
         :param publisher: Callable receiving a :class:`TerminalExitEvent`.
         """
         self._terminal_exit_publisher = publisher
+
+    def _set_session_status_memo(self, session_id: str, status: str) -> None:
+        """Record the session's latest PTY status for exit classification."""
+        with self._lock:
+            self._last_session_status[session_id] = status
+
+    def _take_session_status_memo(self, session_id: str) -> str | None:
+        """Pop and return the session's recorded PTY status (or ``None``)."""
+        with self._lock:
+            return self._last_session_status.pop(session_id, None)
+
+    def note_session_turn_started(self, session_id: str) -> None:
+        """Mark a session as having an in-flight turn.
+
+        Closes the window between a new turn starting and the watcher's first
+        ``running`` edge: without it, a crash in that gap would read the prior
+        turn's stale ``idle`` and be misclassified as a clean shutdown. The
+        watcher flips the memo back to ``idle`` once the turn completes.
+
+        :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
+        """
+        self._set_session_status_memo(session_id, "running")
 
     @property
     def terminal_registry(self) -> TerminalRegistry | None:
@@ -954,7 +977,7 @@ class SessionResourceRegistry:
             if emit_status and status_publisher is not None and last_status["value"] != "running":
                 last_status["value"] = "running"
                 # Track for exit classification: a pane exit now reads as a crash.
-                self._last_session_status[session_id] = "running"
+                self._set_session_status_memo(session_id, "running")
                 loop.call_soon_threadsafe(status_publisher, session_id, "running")
 
         def _on_exit() -> None:
@@ -1009,7 +1032,9 @@ class SessionResourceRegistry:
             if status_publisher is not None and last_status["value"] != "idle":
                 last_status["value"] = "idle"
                 # Track for exit classification: a pane exit now reads as clean.
-                self._last_session_status[session_id] = "idle"
+                # Edge ordering: the watcher thread runs idle/exit serially, so
+                # this idle commits before any later on_exit reads the memo.
+                self._set_session_status_memo(session_id, "idle")
                 loop.call_soon_threadsafe(status_publisher, session_id, "idle")
             # Clear the activity throttle so the next working episode emits
             # its first pulse immediately, keeping the activity badge
@@ -1058,7 +1083,7 @@ class SessionResourceRegistry:
         command, args_count, cwd, last_output = _terminal_exit_diagnostics(instance)
         # Idle = clean shutdown after the turn finished. Anything else (running,
         # or never observed → boot failure) stays a failure.
-        session_was_idle = self._last_session_status.pop(session_id, None) == "idle"
+        session_was_idle = self._take_session_status_memo(session_id) == "idle"
 
         if self._terminal_registry is not None:
             try:
@@ -1170,10 +1195,12 @@ class SessionResourceRegistry:
                 if lifecycle is not None:
                     self._terminal_lifecycles[(target_session_id, terminal_id)] = lifecycle
             # Move the PTY-status memo with the pane so a post-transfer exit is
-            # classified against the right session.
-            moved_status = self._last_session_status.pop(source_session_id, None)
-            if moved_status is not None:
-                self._last_session_status[target_session_id] = moved_status
+            # classified against the right session. Don't clobber a status the
+            # target already has from its own terminal.
+            with self._lock:
+                moved_status = self._last_session_status.pop(source_session_id, None)
+                if moved_status is not None and target_session_id not in self._last_session_status:
+                    self._last_session_status[target_session_id] = moved_status
             try:
                 await entry.instance.set_conversation_link(
                     self._terminal_registry.conversation_link_for_id(target_session_id)
@@ -1213,7 +1240,7 @@ class SessionResourceRegistry:
 
         :param session_id: Session/conversation identifier.
         """
-        self._last_session_status.pop(session_id, None)
+        self._take_session_status_memo(session_id)
         with self._lock:
             primary = self._primary_envs.pop(session_id, None)
             stale_role_keys = [key for key in self._terminal_roles if key[0] == session_id]

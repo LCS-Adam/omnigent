@@ -527,6 +527,87 @@ async def test_required_terminal_exit_without_observed_status_is_failure(tmp_pat
     assert exits[0].session_was_idle is False
 
 
+@pytest.mark.asyncio
+async def test_required_terminal_exit_after_new_turn_is_failure(tmp_path: Path) -> None:
+    """A crash right after a new turn starts (before the watcher's first
+    ``running`` edge) is a failure, not a stale clean shutdown.
+
+    ``note_session_turn_started`` resets the prior turn's ``idle`` memo so the
+    turn-boundary window can't silently swallow a real crash.
+
+    :param tmp_path: Temporary directory for fake terminal paths.
+    """
+    terminal_registry = TerminalRegistry()
+    registry = SessionResourceRegistry(terminal_registry=terminal_registry)
+    instance = make_test_terminal_instance("claude", "main", tmp_path)
+    terminal_registry._by_conversation.setdefault("conv_turn", {})[("claude", "main")] = instance
+    exits: list[TerminalExitEvent] = []
+    exit_published = asyncio.Event()
+
+    def _publish_exit(event: TerminalExitEvent) -> None:
+        exits.append(event)
+        exit_published.set()
+
+    registry.set_terminal_exit_publisher(_publish_exit)
+    callbacks = await _observe_native_agent_terminal_and_capture(
+        registry, terminal_registry, instance, "conv_turn"
+    )
+
+    # The previous turn finished (idle), then a new message starts a turn and
+    # the pane crashes before the watcher emits its next ``running`` edge.
+    on_idle = callbacks["on_idle"]
+    assert callable(on_idle)
+    on_idle()
+    registry.note_session_turn_started("conv_turn")
+    on_exit = callbacks["on_exit"]
+    assert callable(on_exit)
+    on_exit()
+    await asyncio.wait_for(exit_published.wait(), timeout=1.0)
+
+    assert len(exits) == 1
+    assert exits[0].session_was_idle is False
+
+
+@pytest.mark.asyncio
+async def test_cleanup_session_clears_status_memo(tmp_path: Path) -> None:
+    """``cleanup_session`` drops the session's PTY-status memo.
+
+    :param tmp_path: Temporary directory (unused beyond registry construction).
+    """
+    del tmp_path
+    registry = SessionResourceRegistry()
+    registry.note_session_turn_started("conv_cleanup")
+    assert "conv_cleanup" in registry._last_session_status
+
+    await registry.cleanup_session("conv_cleanup")
+
+    assert "conv_cleanup" not in registry._last_session_status
+
+
+@pytest.mark.asyncio
+async def test_transfer_terminal_moves_status_memo(tmp_path: Path) -> None:
+    """Transferring a terminal moves its PTY-status memo to the new owner.
+
+    :param tmp_path: Temporary directory for fake terminal paths.
+    """
+    terminal_registry = TerminalRegistry()
+    registry = SessionResourceRegistry(terminal_registry=terminal_registry)
+    view = await registry.launch_required_terminal(
+        "conv_src",
+        "codex",
+        "main",
+        TerminalEnvSpec(command="codex", args=["--remote", "ws://127.0.0.1:1234"]),
+        resource_role=CODEX_NATIVE_TERMINAL_ROLE,
+    )
+    registry.note_session_turn_started("conv_src")
+
+    moved = await registry.transfer_terminal("conv_src", "conv_dst", view.id)
+
+    assert moved is not None
+    assert "conv_src" not in registry._last_session_status
+    assert registry._last_session_status.get("conv_dst") == "running"
+
+
 def test_get_resource_finds_default() -> None:
     """get_resource finds the default environment."""
     reg = SessionResourceRegistry()
