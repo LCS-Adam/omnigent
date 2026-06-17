@@ -292,26 +292,33 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Parse the JSON from the agent output. The agent may include
-          # markdown fences or stray text — extract the first JSON object.
+          # Parse the JSON from the agent output, validate against
+          # allowlists, and write gh commands to a script file.
+          # All GitHub mutations are built in Python with proper escaping
+          # — no eval, no shell interpolation of model output.
           python3 <<'PYEOF'
-          import json, re, pathlib, sys
+          import json, pathlib, sys, shlex
 
           raw = pathlib.Path("/tmp/triage_output.txt").read_text()
 
           # Strip markdown code fences if present.
+          import re
           raw = re.sub(r"```(?:json)?\s*", "", raw)
 
-          # Find the first JSON object in the output.
-          match = re.search(r"\{[^{}]*\}", raw, re.DOTALL)
-          if not match:
-              print("::error::Triage agent did not output valid JSON")
-              sys.exit(1)
+          # Use raw_decode to find the first valid JSON object, handling
+          # nested braces (e.g. reasoning containing { or }).
+          decoder = json.JSONDecoder()
+          result = None
+          for i, ch in enumerate(raw):
+              if ch == "{":
+                  try:
+                      result, _ = decoder.raw_decode(raw, i)
+                      break
+                  except json.JSONDecodeError:
+                      continue
 
-          try:
-              result = json.loads(match.group())
-          except json.JSONDecodeError as e:
-              print(f"::error::Failed to parse triage JSON: {e}")
+          if result is None:
+              print("::error::Triage agent did not output valid JSON")
               sys.exit(1)
 
           # Validate fields against allowed values to prevent label injection.
@@ -328,6 +335,8 @@ jobs:
           if result.get("needs_info"):
               labels_add.append("needs-info")
               labels_remove.append("needs-triage")
+              # needs-info issues are still triaged — they just need more info.
+              labels_add.append("triaged")
           else:
               # Type
               t = result.get("type")
@@ -352,10 +361,17 @@ jobs:
               if result.get("help_wanted"):
                   labels_add.append("help-wanted")
 
-              # Duplicate
+              # Duplicate — only accept if the issue number is in our
+              # pre-fetched candidate list (prevents hallucinated refs).
               dup = result.get("duplicate_of")
-              if dup and isinstance(dup, int):
+              candidates = json.loads(
+                  pathlib.Path("/tmp/duplicates.json").read_text()
+              )
+              candidate_numbers = {d["number"] for d in candidates}
+              if dup and isinstance(dup, int) and dup in candidate_numbers:
                   labels_add.append("duplicate")
+              else:
+                  dup = None  # discard hallucinated duplicate
 
               labels_remove.append("needs-triage")
               labels_add.append("triaged")
@@ -368,11 +384,39 @@ jobs:
               "labels_add": labels_add,
               "labels_remove": labels_remove,
               "components": valid_components,
-              "duplicate_of": result.get("duplicate_of") if isinstance(result.get("duplicate_of"), int) else None,
+              "duplicate_of": dup if isinstance(dup, int) else None,
               "priority": result.get("priority") if result.get("priority") in ALLOWED_PRIORITIES else None,
               "reasoning": result.get("reasoning", ""),
           }
           pathlib.Path("/tmp/triage_result.json").write_text(json.dumps(output))
+
+          # Build a shell script with properly escaped arguments — no eval.
+          import os
+          issue = os.environ["ISSUE_NUMBER"]
+          repo = os.environ["REPO"]
+          cmds = []
+
+          # Label changes: build a single gh issue edit command.
+          args = ["gh", "issue", "edit", issue, "--repo", repo]
+          for label in labels_add:
+              args += ["--add-label", label]
+          for label in labels_remove:
+              args += ["--remove-label", label]
+          if labels_add or labels_remove:
+              cmds.append(" ".join(shlex.quote(a) for a in args))
+
+          # Duplicate comment.
+          if output["duplicate_of"]:
+              comment_args = [
+                  "gh", "issue", "comment", issue, "--repo", repo,
+                  "--body", f"Potential duplicate of #{output['duplicate_of']}. React 👎 to contest.",
+              ]
+              cmds.append(" ".join(shlex.quote(a) for a in comment_args))
+
+          pathlib.Path("/tmp/triage_commands.sh").write_text(
+              "#!/usr/bin/env bash\nset -euo pipefail\n" +
+              "\n".join(cmds) + "\n"
+          )
 
           # Print summary for the workflow log.
           print(f"Labels to add: {labels_add}")
@@ -382,31 +426,8 @@ jobs:
           print(f"Reasoning: {output['reasoning']}")
           PYEOF
 
-          # Read the validated result.
-          result=$(cat /tmp/triage_result.json)
-
-          # Apply label additions.
-          add_args=""
-          for label in $(echo "$result" | jq -r '.labels_add[]'); do
-            add_args="$add_args --add-label \"$label\""
-          done
-
-          # Apply label removals.
-          remove_args=""
-          for label in $(echo "$result" | jq -r '.labels_remove[]'); do
-            remove_args="$remove_args --remove-label \"$label\""
-          done
-
-          if [ -n "$add_args" ] || [ -n "$remove_args" ]; then
-            eval gh issue edit "$ISSUE_NUMBER" --repo "$REPO" $add_args $remove_args
-          fi
-
-          # Post duplicate comment (the only comment the bot ever posts).
-          dup=$(echo "$result" | jq -r '.duplicate_of // empty')
-          if [ -n "$dup" ]; then
-            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-              --body "Potential duplicate of #${dup}. React 👎 to contest."
-          fi
+          # Execute the validated commands.
+          bash /tmp/triage_commands.sh
 
           # Round-robin assign engineer for P0/P1 issues, with domain routing.
           priority=$(echo "$result" | jq -r '.priority // empty')
