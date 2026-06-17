@@ -66,11 +66,11 @@ jobs:
       # These run before the LLM and use the GitHub token directly.
       # The LLM never sees GH_TOKEN.
 
-      - name: Read maintainer list
+      - name: Read issue assignees
         if: steps.creds.outputs.available == 'true'
         id: maintainers
         run: |
-          list=$(grep -v '^#' .github/MAINTAINER | grep -v '^\s*$' | tr '\n' ',' | sed 's/,$//')
+          list=$(grep -v '^#' .github/ISSUE_ASSIGNEES | grep -v '^\s*$' | tr '\n' ',' | sed 's/,$//')
           echo "list=${list}" >> "$GITHUB_OUTPUT"
 
       - name: Fetch issue content and duplicate candidates
