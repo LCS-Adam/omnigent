@@ -4,16 +4,20 @@ Drives the REPL under pexpect, types the first half of a
 prompt, sends ``Ctrl+J`` to insert a newline mid-input, types the
 second half, and finally submits with Enter. Asserts the full
 multi-line message reached the agent by looking for BOTH halves
-in the rendered ``You>`` banner that the REPL echoes to
-scrollback before streaming the assistant response.
+in the rendered ``❯`` prompt echo the REPL writes to scrollback
+before streaming the assistant response.
+
+Turn synchronization uses the visible ``⠹ working`` activity
+line and the ``❯`` input prompt rather than the truncated /
+CPR-suppressed ``state:`` badge (see test_repl_smoke).
 
 **What breaks if this fails:**
 - ``omnigent.cli`` removes the ``@kb.add("c-j", ...)`` binding
   that maps Ctrl+J to ``insert_text("\\n")`` — multi-line
   composition is a core REPL affordance.
-- ``_format_user_message`` stops preserving interior newlines
-  (folds the message into one line), so multi-line input still
-  submits but is no longer faithfully echoed.
+- ``RichBlockFormatter.user_message`` stops preserving interior
+  newlines (folds the message into one line), so multi-line
+  input still submits but is no longer faithfully echoed.
 - The prompt-toolkit submit binding regresses to fire on the
   *first* newline rather than the explicit Enter keypress —
   would truncate the prompt at the Ctrl+J boundary.
@@ -33,9 +37,12 @@ from tests.e2e.omnigent._pexpect_harness import (
     clean_exit,
     spawn_omnigent_run,
     strip_ansi,
-    wait_for_ready,
 )
 from tests.e2e.omnigent._snapshot import compare_snapshot
+
+# Visible turn-synchronization markers (see test_repl_smoke).
+_RUNNING_MARKER = r"working"
+_COMPLETION_MARKER = r"❯ "
 
 # openai-agents is used because it doesn't require the
 # ``~/.databrickscfg`` patch — the env vars the credentials
@@ -92,7 +99,7 @@ def test_repl_multiline_ctrl_j_insert(
         timeout=_SPAWN_TIMEOUT,
     )
     try:
-        wait_for_ready(child, timeout=_BOOT_TIMEOUT)
+        child.expect(_COMPLETION_MARKER, timeout=_BOOT_TIMEOUT)
         # Type the first line, insert a newline via Ctrl+J, type
         # the second line, then submit with CR. Using
         # sendcontrol("j") rather than sending the raw byte so
@@ -106,6 +113,8 @@ def test_repl_multiline_ctrl_j_insert(
             child,
             running_timeout=_RUNNING_TIMEOUT,
             completion_timeout=_COMPLETION_TIMEOUT,
+            running_marker=_RUNNING_MARKER,
+            completion_pattern=_COMPLETION_MARKER,
         )
         clean_exit(child, timeout=_EXIT_TIMEOUT)
         exit_code = child.exitstatus
@@ -125,13 +134,13 @@ def test_repl_multiline_ctrl_j_insert(
         # text.
         "first_line_present": _FIRST_LINE in combined_stripped,
         "second_line_present": _SECOND_LINE in combined_stripped,
-        # The "You>" banner is the REPL's deterministic echo of
-        # a submitted prompt. If only the input buffer were shown
-        # (no submission), this would be absent — the banner
-        # proves ``_submit_input`` actually ran with the full
-        # multi-line text.
-        "user_banner_present": "You>" in combined_stripped,
-        "agent_banner_present": "Agent>" in combined_stripped,
+        # The ``❯`` marker is the REPL's deterministic echo of a
+        # submitted prompt (``RichBlockFormatter.user_message``).
+        # If only the input buffer were shown (no submission), no
+        # turn would start; its presence alongside both halves
+        # proves the full multi-line text was actually submitted.
+        # Replaces the removed ``You>`` / ``Agent>`` banner checks.
+        "user_prompt_echoed": "❯" in combined_stripped,
     }
     diffs = compare_snapshot("test_repl_multiline", observed)
     assert diffs == [], (

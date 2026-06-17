@@ -738,44 +738,14 @@ skips:
   # failing ones with accurate reasons so CI doesn't re-discover
   # them every run.
 
-  - id: tests/e2e/omnigent/test_repl_multiline.py::test_repl_multiline_ctrl_j_insert
-    reason: "Worker killer on shard 0: pytest-xdist reports 'node down: Not properly terminated' while starting this test. Wedges shard 0 until the 30-min action timeout. Investigate before unskipping."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/omnigent/test_repl_smoke.py::test_repl_smoke_single_prompt
-    reason: "REPL smoke snapshot mismatch post-path-fix on shard 1; path repointing got us past 'Agent path not found' but the pexpect output now diverges from the recorded snapshot. Needs snapshot refresh or REPL output investigation."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
   - id: tests/e2e/omnigent/test_repl_ctrl_g_overview.py::test_repl_ctrl_g_overview_toggle
     reason: "REPL pexpect TIMEOUT post-path-fix: openai-agents+gpt-5-mini turn exceeds 60s pexpect deadline on ai-oss. Original skip reason still applies after #1141."
     issue: 532
     cluster: model-gateway-compat
     mode: skip
 
-  - id: tests/e2e/omnigent/test_repl_history_recall.py::test_repl_history_recall_up_arrow
-    reason: "REPL pexpect TIMEOUT post-path-fix: same 60s deadline issue as test_repl_ctrl_g_overview_toggle."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/omnigent/test_repl_ctrl_l_clear.py::test_repl_ctrl_l_clears_screen
-    reason: "REPL pexpect TIMEOUT post-path-fix. Same family as test_repl_ctrl_g_overview / test_repl_history_recall."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
   - id: tests/e2e/omnigent/test_repl_model_e2e.py::test_repl_model_command_show_set_reset
     reason: "REPL pexpect TIMEOUT post-path-fix: /model success line not appearing in pexpect after Rich markup output. Needs REPL output-capture investigation."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/omnigent/test_repl_ctrl_c_interrupt.py::test_repl_cancel_re_arms_for_next_turn
-    reason: "REPL ctrl-C pexpect TIMEOUT post-path-fix. Same family as test_repl_ctrl_g_overview."
     issue: 532
     cluster: repl-pexpect-cli
     mode: skip

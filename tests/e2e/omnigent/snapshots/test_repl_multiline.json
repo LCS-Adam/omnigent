@@ -2,6 +2,5 @@
     "exit_code": {"kind": "exact", "value": 0},
     "first_line_present": {"kind": "exact", "value": true},
     "second_line_present": {"kind": "exact", "value": true},
-    "user_banner_present": {"kind": "exact", "value": true},
-    "agent_banner_present": {"kind": "exact", "value": true}
+    "user_prompt_echoed": {"kind": "exact", "value": true}
 }
