@@ -13,7 +13,9 @@
 //
 // Only handles drawn from CODEOWNERS are ever removed, so a manually-added
 // reviewer outside that set is left untouched.
-module.exports = async ({ github, context, core }) => {
+// `dryRun` (set when the workflow runs on a `pull_request` that edits this
+// script) logs the picks instead of mutating reviewers -- a live smoke test.
+module.exports = async ({ github, context, core, dryRun = false }) => {
   const fs = require("fs");
   const TARGET = 2;
   const { owner, repo } = context.repo;
@@ -115,18 +117,18 @@ module.exports = async ({ github, context, core }) => {
     (u) => managed.has(u.toLowerCase()) && !desiredLc.has(u.toLowerCase())
   );
 
-  if (toAdd.length) {
+  if (toAdd.length && !dryRun) {
     await github.rest.pulls.requestReviewers({
       owner, repo, pull_number: pr.number, reviewers: toAdd,
     });
   }
-  if (toRemove.length) {
+  if (toRemove.length && !dryRun) {
     await github.rest.pulls.removeRequestedReviewers({
       owner, repo, pull_number: pr.number, reviewers: toRemove,
     });
   }
   core.info(
-    `Reviewers -> [${desired.join(", ")}]` +
+    `${dryRun ? "[DRY RUN] " : ""}Reviewers -> [${desired.join(", ")}]` +
       ` (area pool ${areaOwners.size || "∅→full"}, +${toAdd.length}/-${toRemove.length}).`
   );
 };
