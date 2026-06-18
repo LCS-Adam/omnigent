@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import logging
 import os
@@ -273,7 +274,11 @@ def _sdk_message_to_events(message: Any) -> list[ExecutorEvent]:  # type: ignore
             is_bridged = False
         call_id = getattr(message, "call_id", None)
         if status == "running":
-            events.append(ToolCallRequest(name=name, args=args, metadata={"call_id": call_id, "is_bridged": is_bridged}))
+            events.append(
+                ToolCallRequest(
+                    name=name, args=args, metadata={"call_id": call_id, "is_bridged": is_bridged}
+                )
+            )
         elif status in ("completed", "error"):
             result = getattr(message, "result", None)
             classification = classify_tool_result(result)
@@ -649,14 +654,12 @@ class CursorExecutor(Executor):
                                 if gate["block"]:
                                     # Cancel the run to prevent further
                                     # native tool use.
-                                    try:
+                                    with contextlib.suppress(Exception):
                                         await run.cancel()
-                                    except Exception:  # noqa: BLE001
-                                        pass
                                     yield event  # emit so observers see what was attempted
-                                    yield ExecutorError(
-                                        message=f"Native tool {event.name!r} denied by policy: {gate['reason']}"
-                                    )
+                                    reason = gate["reason"]
+                                    msg = f"Native tool {event.name!r} denied by policy: {reason}"
+                                    yield ExecutorError(message=msg)
                                     return
                         elif isinstance(event, ToolCallComplete):
                             separate_next_text = True

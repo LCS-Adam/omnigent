@@ -879,7 +879,9 @@ def test_sdk_message_to_events_marks_native_tool_not_bridged() -> None:
     assert events[0].metadata["is_bridged"] is False
 
     # Completed status too.
-    done = _sdk_message_to_events(_tool("bash", "t1", "completed", args={"cmd": "ls"}, result="ok"))
+    done = _sdk_message_to_events(
+        _tool("bash", "t1", "completed", args={"cmd": "ls"}, result="ok")
+    )
     assert isinstance(done[0], ToolCallComplete)
     assert done[0].metadata["is_bridged"] is False
 
@@ -950,6 +952,12 @@ async def test_run_turn_native_tool_denied_by_policy(monkeypatch: pytest.MonkeyP
     assert "denied by policy" in errors[0].message
     assert "bash" in errors[0].message
 
+    # ToolCallRequest appears before ExecutorError, and nothing follows the error.
+    req_idx = next(i for i, e in enumerate(events) if isinstance(e, ToolCallRequest))
+    err_idx = next(i for i, e in enumerate(events) if isinstance(e, ExecutorError))
+    assert req_idx < err_idx
+    assert err_idx == len(events) - 1  # error is the last event
+
     # No TurnComplete — the turn was aborted.
     assert not any(isinstance(e, TurnComplete) for e in events)
 
@@ -998,6 +1006,10 @@ async def test_run_turn_bridged_tool_skips_tool_call_policy(
         events = [e async for e in executor.run_turn([_user("hi")], [], "SYS")]
     finally:
         await executor.close()
+
+    # Verify the bridged tool call was actually observed (not silently dropped).
+    reqs = [e for e in events if isinstance(e, ToolCallRequest)]
+    assert len(reqs) == 1 and reqs[0].name == "sys_session_send"
 
     # The turn completes normally — the bridged tool was NOT policy-gated here.
     assert any(isinstance(e, TurnComplete) for e in events)
