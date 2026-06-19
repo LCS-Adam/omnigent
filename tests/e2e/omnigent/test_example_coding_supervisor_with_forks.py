@@ -73,6 +73,14 @@ def test_coding_supervisor_with_forks_one_shot(
                 "claude-sdk harness prerequisite missing: the 'claude' "
                 "CLI binary must be installed on PATH."
             )
+        # ClaudeSDKExecutor with gateway=True requires ~/.databrickscfg.
+        # Without it the executor raises before the claude binary runs.
+        if not (Path.home() / ".databrickscfg").exists():
+            pytest.skip(
+                "claude-sdk harness prerequisite missing: no "
+                "~/.databrickscfg — ClaudeSDKExecutor(gateway=True) "
+                "needs Databricks gateway credentials."
+            )
     elif harness == "codex":
         require_codex_cli()
     elif harness == "pi":
