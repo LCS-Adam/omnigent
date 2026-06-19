@@ -445,8 +445,7 @@ def mock_llm_server_url(
         log_handle.close()
         log_contents = mock_log.read_text() if mock_log.exists() else ""
         raise RuntimeError(
-            f"Mock LLM server didn't start within 10s.\n"
-            f"Log at {mock_log}:\n{log_contents[-2000:]}"
+            f"Mock LLM server didn't start within 10s.\nLog at {mock_log}:\n{log_contents[-2000:]}"
         )
 
     try:
