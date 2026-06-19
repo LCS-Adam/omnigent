@@ -137,4 +137,3 @@ skips:
     issue: 677
     cluster: run-ap-examples-harness
     mode: skip
-

@@ -73,23 +73,16 @@ def test_coding_supervisor_with_forks_one_shot(
                 "claude-sdk harness prerequisite missing: the 'claude' "
                 "CLI binary must be installed on PATH."
             )
-        # ClaudeSDKExecutor with gateway=True requires ~/.databrickscfg.
-        # Without it the executor raises before the claude binary runs.
-        if not (Path.home() / ".databrickscfg").exists():
-            pytest.skip(
-                "claude-sdk harness prerequisite missing: no "
-                "~/.databrickscfg — ClaudeSDKExecutor(gateway=True) "
-                "needs Databricks gateway credentials."
-            )
+        # Use a non-gateway model so ClaudeSDKExecutor routes through
+        # ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (no ~/.databrickscfg needed).
+        # Databricks-prefixed models set gateway=True which reads the cfg file.
+        if model.startswith("databricks-"):
+            model = "claude-mock"
     elif harness == "codex":
         require_codex_cli()
-        # CodexExecutor(gateway=True) also reads ~/.databrickscfg.
-        if not (Path.home() / ".databrickscfg").exists():
-            pytest.skip(
-                "codex harness prerequisite missing: no "
-                "~/.databrickscfg — CodexExecutor(gateway=True) "
-                "needs Databricks gateway credentials."
-            )
+        # Use a non-gateway model for the same reason as claude-sdk above.
+        if model.startswith("databricks-"):
+            model = "gpt-mock"
     elif harness == "pi":
         if which("pi") is None:
             pytest.skip("pi harness prerequisite missing: 'pi' CLI not on PATH.")
