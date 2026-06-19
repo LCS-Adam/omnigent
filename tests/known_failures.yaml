@@ -53,23 +53,8 @@ skips:
     cluster: no-agent-harness-roundtrip-hang
     mode: skip
 
-  - id: tests/e2e/omnigent/test_repl_session_lifecycle.py::test_repl_effort_command_persists_session_metadata
-    reason: "REPL session-lifecycle / pexpect cluster."
-    issue: 523
-    cluster: repl-pexpect-cli
-    mode: skip
 
-  - id: tests/e2e/omnigent/test_repl_session_lifecycle.py::test_repl_recover_after_runner_death
-    reason: "REPL session-lifecycle / pexpect cluster."
-    issue: 523
-    cluster: repl-pexpect-cli
-    mode: skip
 
-  - id: tests/e2e/omnigent/test_repl_session_lifecycle.py::test_repl_resume_reuses_daemon_runner
-    reason: "REPL session-lifecycle / pexpect cluster."
-    issue: 523
-    cluster: repl-pexpect-cli
-    mode: skip
 
   - id: tests/e2e/omnigent/test_repl_multiline.py::test_repl_multiline_ctrl_j_insert
     reason: "Kept suppressed as a known shard-load/worker-killer heavy pexpect test pending a dedicated round."
