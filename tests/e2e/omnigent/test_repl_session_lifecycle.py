@@ -965,11 +965,7 @@ async def test_repl_reasoning_effort_threads_through(
             omnigent_repo_root,
             yaml_path,
             tmp_path,
-            extra_env={
-                k: env[k]
-                for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY")
-                if k in env
-            },
+            extra_env={k: env[k] for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY") if k in env},
         ) as runner_id:
             async with OmnigentClient(base_url=server.base_url) as client:
                 created = await client.sessions.create(bundle, reasoning_effort="high")
