@@ -1112,6 +1112,9 @@ class SessionsChat:
             async with asyncio.timeout(timeout):
                 await _collect()
         except asyncio.TimeoutError:
+            # Timeout is expected when the session completes before the deadline
+            # or the race window is missed; return whatever text was collected so
+            # far per the method contract (empty QueryResult is valid).
             pass
         return QueryResult(text="".join(text_parts), files=produced)
 
