@@ -82,7 +82,7 @@ async def test_auto_deliver_retries_on_5xx() -> None:
     payload = _completed_payload()
     client = _mock_server_client(503)
 
-    with patch("omnigent.runner.tool_dispatch.asyncio.sleep", new_callable=AsyncMock):
+    with patch("omnigent.runner.tool_dispatch._sleep", new_callable=AsyncMock):
         await _auto_deliver_async_completion(
             payload,
             server_client=client,
@@ -115,7 +115,7 @@ async def test_auto_deliver_handles_timeout() -> None:
     client = AsyncMock(spec=httpx.AsyncClient)
     client.post.side_effect = asyncio.TimeoutError()
 
-    with patch("omnigent.runner.tool_dispatch.asyncio.sleep", new_callable=AsyncMock):
+    with patch("omnigent.runner.tool_dispatch._sleep", new_callable=AsyncMock):
         await _auto_deliver_async_completion(
             payload,
             server_client=client,

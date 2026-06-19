@@ -4769,6 +4769,10 @@ _AUTO_DELIVER_MAX_ATTEMPTS = 3
 _AUTO_DELIVER_RETRY_BASE_DELAY_S = 0.5
 _AUTO_DELIVER_RETRY_MAX_DELAY_S = 4.0
 
+# Thin indirection so tests can patch ``tool_dispatch._sleep`` instead of
+# the global ``asyncio.sleep`` singleton (which leaks across workers).
+_sleep = asyncio.sleep
+
 
 async def _auto_deliver_async_completion(
     payload: dict[str, Any],
@@ -4814,8 +4818,7 @@ async def _auto_deliver_async_completion(
                 isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
             )
             _logger.debug(
-                "Async-tool auto-deliver attempt %d/%d for session=%s failed "
-                "(retryable=%s): %r",
+                "Async-tool auto-deliver attempt %d/%d for session=%s failed (retryable=%s): %r",
                 attempt,
                 _AUTO_DELIVER_MAX_ATTEMPTS,
                 conversation_id,
@@ -4836,7 +4839,7 @@ async def _auto_deliver_async_completion(
                 _AUTO_DELIVER_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)),
                 _AUTO_DELIVER_RETRY_MAX_DELAY_S,
             )
-            await asyncio.sleep(delay_s)
+            await _sleep(delay_s)
 
 
 def _schedule_auto_delivery(
