@@ -27,6 +27,7 @@ Usage::
 
 from __future__ import annotations
 
+import os
 import uuid
 from pathlib import Path
 
@@ -532,7 +533,10 @@ def test_no_guardrails_agent_unaffected(
 # classifier-call failure (fail-closed DENY) can flip the expected
 # allow/deny outcome. Bounded reruns absorb that non-determinism without
 # masking a genuine wiring regression: a real break fails all 3 attempts.
-@pytest.mark.skip(reason="requires real LLM (prompt policy classifier)")
+@pytest.mark.skipif(
+    not os.getenv("DATABRICKS_TOKEN"),
+    reason="requires real LLM credentials for prompt policy classifier",
+)
 @pytest.mark.flaky(reruns=2, reruns_delay=5)
 def test_prompt_policy_allow_path_reaches_llm(
     http_client: httpx.Client,
@@ -550,7 +554,10 @@ def test_prompt_policy_allow_path_reaches_llm(
 
 # Same real-classifier non-determinism as the allow-path test: the DENY can
 # occasionally not fire. Bounded reruns; a real regression fails all 3.
-@pytest.mark.skip(reason="requires real LLM (prompt policy classifier)")
+@pytest.mark.skipif(
+    not os.getenv("DATABRICKS_TOKEN"),
+    reason="requires real LLM credentials for prompt policy classifier",
+)
 @pytest.mark.flaky(reruns=2, reruns_delay=5)
 def test_prompt_policy_deny_path_short_circuits(
     http_client: httpx.Client,
