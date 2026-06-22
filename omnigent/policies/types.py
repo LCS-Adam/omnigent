@@ -217,6 +217,14 @@ class PolicyResult:
         Powers the ``deciding_policy`` outer-span attribute
         (POLICIES.md §11.5) and the per-policy ``ask_timeout``
         lookup (§7.2).
+    :param deciding_policies: Names of ALL policies that
+        returned ASK for the composed result. Engine-set only —
+        single-policy results and non-ASK results leave it
+        ``None``. Carries the full set of ASK deciders so
+        callers can surface each policy's context (e.g. per-
+        policy timeout, observability) when multiple policies
+        gate the same request. ``deciding_policy`` is always
+        ``deciding_policies[0]`` for backward compatibility.
     :param data: Optional replacement payload returned by the
         policy callable. When present on an ALLOW result, the
         enforcement site substitutes this value for the original
@@ -225,6 +233,10 @@ class PolicyResult:
         phase). ``None`` means "use original content unchanged".
         ``Any`` because the shape varies by phase: a dict of
         tool arguments on TOOL_CALL, a string on TOOL_RESULT.
+        When multiple policies transform data, each policy
+        receives the previous policy's output as its input —
+        the engine feeds the composed result back as
+        ``ctx.content`` before dispatching to the next policy.
     :param state_updates: Ordered list of :class:`StateUpdate`
         operations to apply to the engine's ``session_state``.
         Each entry specifies a key, an action (``SET``,
@@ -241,6 +253,7 @@ class PolicyResult:
     reason: str | None = None
     set_labels: dict[str, str] | None = None
     deciding_policy: str | None = None
+    deciding_policies: list[str] | None = None
     data: Any = None
     state_updates: list[StateUpdate] | None = None
 
@@ -276,6 +289,11 @@ class ElicitationRequest:
         ASKing policy. Drives per-policy ``ask_timeout`` lookup,
         observability, and the renderer's "policy X says..." label.
         e.g. ``"pii_redact"``.
+    :param policy_names: Names of ALL ASKing policies that contributed
+        to this elicitation. ``None`` when only one policy asked (the
+        common case). Surfaces in the elicitation event's extras so
+        the renderer can label each policy's ask separately.
+        e.g. ``["pii_redact", "cost_gate"]``.
     :param content_preview: Truncated snapshot of the content being
         gated. Lets a human reviewer see what they're approving
         without overwhelming the UI on a 50 KB payload. Surfaces in
@@ -287,6 +305,7 @@ class ElicitationRequest:
     policy_name: str
     content_preview: str
     requested_schema: dict[str, Any] = field(default_factory=dict)
+    policy_names: list[str] | None = None
 
 
 @dataclass
