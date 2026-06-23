@@ -76,14 +76,15 @@ from tests.e2e.helpers import POLL_INTERVAL_S
 # down on a genuine timeout.
 # These sub-agent tests drive each child agent through per-sub-agent mock-LLM
 # routing — every child runs on its own mock model and auth.base_url. A server
-# < 0.3.0 does not propagate the sub-agent executor's mock base_url, so the
-# child harness reaches the real gateway and its mock-only model name is
-# rejected (HTTP 400); the child returns nothing, so the parent's auto-wake has
-# nothing to surface. Verified against a v0.2.0 server: the child 400s on the
-# real gateway while auto-wake itself works (waiting downgraded, no 500). This
-# is a mock-LLM test-infrastructure gap, not a product regression. The
-# backwards-compat matrix skips these against servers < 0.3.0 via
-# min_server_version; they run unchanged on main and in the gate.
+# < 0.3.0 does not propagate the sub-agent executor's mock base_url (fixed in
+# #779, which added auth to the inner ExecutorSpec; it landed ~2h after v0.2.0
+# was tagged, so v0.2.0 just missed it), so the child harness reaches the real
+# gateway and its mock-only model name is rejected (HTTP 400); the child returns
+# nothing, so the parent's auto-wake has nothing to surface. Verified against a
+# v0.2.0 server: the child 400s on the real gateway while auto-wake itself works
+# (waiting downgraded, no 500). This is a mock-LLM test-infrastructure gap, not
+# a product regression. The backwards-compat matrix skips these against servers
+# < 0.3.0 via min_server_version; they run unchanged on main and in the gate.
 pytestmark = [
     pytest.mark.timeout(600, method="signal"),
     pytest.mark.min_server_version("0.3.0"),

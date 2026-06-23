@@ -29,8 +29,9 @@ from tests.e2e.conftest import (
 )
 
 # This test uses per-sub-agent mock-LLM routing (the child runs on its own mock
-# model + auth.base_url), which a server < 0.3.0 does not propagate — the child
-# reaches the real gateway and fails, so its result never surfaces (see
+# model + auth.base_url), which a server < 0.3.0 does not propagate (fixed in
+# #779, which landed ~2h after v0.2.0 was tagged) — the child reaches the real
+# gateway and fails, so its result never surfaces (see
 # test_named_sub_agent_persistence.py for the verified mechanism). A mock-LLM
 # test-infra gap, not a product regression. The backwards-compat matrix skips
 # this against servers < 0.3.0; it runs unchanged on main.

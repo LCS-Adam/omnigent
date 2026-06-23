@@ -42,8 +42,9 @@ TOOLS: list[dict[str, Any]] = _tool_mod.TOOLS
 execute_tool = _tool_mod.execute_tool
 
 # These tests use per-sub-agent mock-LLM routing (each child on its own mock
-# model + auth.base_url), which a server < 0.3.0 does not propagate — the child
-# reaches the real gateway and fails, so its result never surfaces (see
+# model + auth.base_url), which a server < 0.3.0 does not propagate (fixed in
+# #779, which landed ~2h after v0.2.0 was tagged) — the child reaches the real
+# gateway and fails, so its result never surfaces (see
 # test_named_sub_agent_persistence.py for the verified mechanism). A mock-LLM
 # test-infra gap, not a product regression. The backwards-compat matrix skips
 # these against servers < 0.3.0; they run unchanged on main.
