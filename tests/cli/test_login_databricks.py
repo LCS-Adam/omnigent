@@ -22,6 +22,7 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
+from omnigent.cli import _load_global_config, _save_global_config
 from omnigent.cli import cli as cli_group
 
 _APPS_URL = "https://myapp-1234.aws.databricksapps.com"
@@ -366,8 +367,6 @@ def test_login_sets_default_server(monkeypatch: pytest.MonkeyPatch, token_dir: P
     just-logged-in server must become the configured default so the next
     bare run targets it.
     """
-    import omnigent.cli as cli_mod
-
     fake = _FakeHttpx(
         responses=[
             _response(302, headers={"location": _APPS_REDIRECT}),
@@ -379,7 +378,7 @@ def test_login_sets_default_server(monkeypatch: pytest.MonkeyPatch, token_dir: P
     result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
 
     assert result.exit_code == 0, result.output
-    assert cli_mod._load_global_config().get("server") == _APPS_URL
+    assert _load_global_config().get("server") == _APPS_URL
 
 
 def test_login_header_mode_sets_default_server(
@@ -394,8 +393,6 @@ def test_login_header_mode_sets_default_server(
     targets it. This also proves the default is set for a non-Databricks
     posture, not just the Apps branch.
     """
-    import omnigent.cli as cli_mod
-
     fake = _FakeHttpx(responses=[_response(200, body={"user_id": "proxied"})])
     _patch_login_env(monkeypatch, fake_httpx=fake)
 
@@ -403,7 +400,7 @@ def test_login_header_mode_sets_default_server(
 
     assert result.exit_code == 0, result.output
     assert "header-auth mode" in result.output
-    assert cli_mod._load_global_config().get("server") == "http://proxy.internal:6767"
+    assert _load_global_config().get("server") == "http://proxy.internal:6767"
 
 
 def test_login_accounts_mode_sets_default_server(
@@ -419,16 +416,14 @@ def test_login_accounts_mode_sets_default_server(
     (success) to isolate that wiring — its own HTTP flow is a separate
     concern.
     """
-    import omnigent.cli as cli_mod
-
     fake = _FakeHttpx(responses=[_response(401, body={"login_url": "/login"})])
     _patch_login_env(monkeypatch, fake_httpx=fake)
-    monkeypatch.setattr(cli_mod, "_accounts_login", lambda server: None)
+    monkeypatch.setattr("omnigent.cli._accounts_login", lambda server: None)
 
     result = CliRunner().invoke(cli_group, ["login", "http://omni.internal:6767"])
 
     assert result.exit_code == 0, result.output
-    assert cli_mod._load_global_config().get("server") == "http://omni.internal:6767"
+    assert _load_global_config().get("server") == "http://omni.internal:6767"
 
 
 def test_login_oidc_mode_sets_default_server(
@@ -443,8 +438,6 @@ def test_login_oidc_mode_sets_default_server(
     """
     import time
     import webbrowser
-
-    import omnigent.cli as cli_mod
 
     server = "http://omni-oidc.internal:6767"
     fake = _FakeHttpx(
@@ -467,7 +460,7 @@ def test_login_oidc_mode_sets_default_server(
     result = CliRunner().invoke(cli_group, ["login", server])
 
     assert result.exit_code == 0, result.output
-    assert cli_mod._load_global_config().get("server") == server
+    assert _load_global_config().get("server") == server
 
 
 def test_login_failure_leaves_default_server_unchanged(
@@ -480,10 +473,8 @@ def test_login_failure_leaves_default_server_unchanged(
     otherwise a failed login against a server the user can't actually
     reach would strand every later bare ``omnigent`` on that dead URL.
     """
-    import omnigent.cli as cli_mod
-
     # Seed an existing default so we can prove it survives a failed login.
-    cli_mod._save_global_config({"server": "https://existing.example.com"})
+    _save_global_config({"server": "https://existing.example.com"})
     fake = _FakeHttpx(
         responses=[
             _response(302, headers={"location": _APPS_REDIRECT}),
@@ -495,7 +486,7 @@ def test_login_failure_leaves_default_server_unchanged(
     result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
 
     assert result.exit_code != 0
-    assert cli_mod._load_global_config().get("server") == "https://existing.example.com"
+    assert _load_global_config().get("server") == "https://existing.example.com"
 
 
 # ── bare-workspace URL expansion ────────────────────────────────────
