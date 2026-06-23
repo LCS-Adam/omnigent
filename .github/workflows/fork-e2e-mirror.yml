@@ -1,17 +1,20 @@
 name: Fork e2e mirror
 
-# Mirrors a gated fork PR's head onto a trusted fork-e2e/pr-N branch so e2e runs
-# there as a `push` (with secrets). It's a pure git-ref update via a GitHub App
-# token (refs pushed by the default GITHUB_TOKEN don't trigger workflows); it
-# never checks out or runs fork code. Mirroring requires BOTH the contributor
-# Security Scan to pass (the blocking `gate` job, via security-gate.yml) AND a
-# maintainer's approving PR review (should-mirror.sh).
+# Mirrors a gated fork PR's head onto a trusted fork-e2e/pr-N branch so the
+# secret-bearing suites run there as a `push` (with secrets). As of #802 plain
+# e2e is mock-LLM only and runs on fork PRs directly via `pull_request`; the
+# mirror now exists for the E2E UI suite (and any other workflow that still
+# needs the gateway secret on fork code). It's a pure git-ref update via a
+# GitHub App token (refs pushed by the default GITHUB_TOKEN don't trigger
+# workflows); it never checks out or runs fork code. Mirroring requires BOTH the
+# contributor Security Scan to pass (the blocking `gate` job, via
+# security-gate.yml) AND a maintainer's approving PR review (should-mirror.sh).
 #
-# Maintainer approval is the sole human gate for running secret-bearing e2e on a
-# fork PR. Only users with write access can submit approving reviews, and the
+# Maintainer approval is the sole human gate for running secret-bearing suites on
+# a fork PR. Only users with write access can submit approving reviews, and the
 # gate further verifies the approver is in .github/MAINTAINER, so an external
 # fork author can never open it. It is intentionally tied to the merge gate
-# (maintainer-approval.yml): approving the PR runs e2e AND approves for merge.
+# (maintainer-approval.yml): approving the PR runs the suites AND approves for merge.
 # Requesting changes or dismissing the review stops future mirrors; closing the
 # PR tears down the mirror branch.
 #

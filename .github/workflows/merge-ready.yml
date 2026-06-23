@@ -205,9 +205,11 @@ jobs:
             echo "automerge=false" >> "$GITHUB_OUTPUT"
           fi
           # A fork PR without a maintainer's approving review or the
-          # `e2e-approved` label never runs e2e (the fork pull_request run is
-          # an empty matrix), so the gate blocks until one of these is present.
-          # Same-repo PRs run e2e with secrets directly and need no gate.
+          # `e2e-approved` label never runs the E2E UI suite (its fork
+          # pull_request run is an empty matrix -- it needs the gateway secret),
+          # so the gate blocks until one of these is present. Plain e2e is
+          # mock-LLM only and runs on fork PRs directly. Same-repo PRs run
+          # everything with secrets directly and need no gate.
           if [[ "$(echo "$INFO" | jq -r '.isCrossRepository')" == "true" ]]; then
             # Check path 1: maintainer approval via PR review.
             MAINTAINERS_LC=$(echo "${MAINTAINERS:-}" | tr '[:upper:]' '[:lower:]')

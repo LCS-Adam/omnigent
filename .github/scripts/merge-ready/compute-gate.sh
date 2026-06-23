@@ -29,15 +29,17 @@ else
   LONG=$':hourglass: gate not green yet. Required checks not satisfied:\n\n'"$FAILED"$'\nThe merge will fire once these turn green.'
 fi
 
-# Fork PRs never run e2e on their own: the fork `pull_request` run resolves to
-# an empty shard matrix, so the suite only runs once a maintainer approves the
-# PR (which mirrors the head to a trusted fork-e2e/** branch). Without approval
-# the e2e checks are satisfied-via-skip and the PR would go green with e2e never
-# having executed -- so block merge until a maintainer approves.
+# Fork PRs never run the E2E UI suite on their own: it needs the gateway secret,
+# so its fork `pull_request` run resolves to an empty shard matrix and the suite
+# only runs once a maintainer approves the PR (which mirrors the head to a
+# trusted fork-e2e/** branch). Without approval the e2e-ui checks are
+# satisfied-via-skip and the PR would go green with e2e-ui never having executed
+# -- so block merge until a maintainer approves. (Plain e2e is mock-LLM only and
+# runs on fork PRs directly, so it does not need this gate.)
 if [[ "${FORK_NEEDS_E2E_APPROVAL:-false}" == "true" ]]; then
   STATE=failure
-  SHORT="Awaiting maintainer approval for e2e"
-  LONG="$LONG"$'\n\n:no_entry: **E2e tests are required for fork PRs.** A maintainer must approve this PR or apply the `e2e-approved` label to trigger the e2e suite. The merge gate will stay red until e2e passes.'
+  SHORT="Awaiting maintainer approval for e2e-ui"
+  LONG="$LONG"$'\n\n:no_entry: **E2e UI tests are required for fork PRs.** A maintainer must approve this PR or apply the `e2e-approved` label to trigger the e2e-ui suite. The merge gate will stay red until e2e-ui passes.'
 fi
 
 # GitHub commit-status descriptions max out at 140 chars.
