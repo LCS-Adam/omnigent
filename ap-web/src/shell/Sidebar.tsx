@@ -508,8 +508,8 @@ function ConversationList({
   const sections = useMemo(() => {
     const allWithBackfill = [...allConversations, ...pinnedBackfill];
     // Pinned rows are ordered strictly by when they were pinned (newest pin
-    // on top), not by `updated_at` — a pinned session shouldn't jump when it
-    // gets a new message.
+    // at the bottom), not by `updated_at` — a pinned session shouldn't jump
+    // when it gets a new message.
     const pinned = orderByPinnedSequence(
       allWithBackfill.filter((c) => pinnedSet.has(c.id) && c.archived !== true),
       pinnedConversationIds,

@@ -118,20 +118,21 @@ describe("pin helpers", () => {
 });
 
 describe("orderByPinnedSequence", () => {
-  it("orders by pin sequence, ignoring updated_at", () => {
-    // conv_b is the most recently updated, but conv_a was pinned more
-    // recently (it leads the ids list), so it must sort first.
+  it("puts the newest pin last, ignoring updated_at", () => {
+    // conv_a leads the ids list (the most recent pin) AND has the newest
+    // updated_at, yet it must render LAST: pinned order is oldest-pin-first
+    // (newest pin at the bottom) and never follows updated_at.
     const convA = conversation("conv_a", "A", new Date(2026, 4, 14, 9), {
-      updatedAt: new Date(2026, 4, 14, 9),
-    });
-    const convB = conversation("conv_b", "B", new Date(2026, 4, 14, 8), {
       updatedAt: new Date(2026, 4, 14, 23),
     });
+    const convB = conversation("conv_b", "B", new Date(2026, 4, 14, 8), {
+      updatedAt: new Date(2026, 4, 14, 9),
+    });
 
-    // Passed in updated_at-desc order to prove the sort re-orders them.
-    expect(orderByPinnedSequence([convB, convA], ["conv_a", "conv_b"]).map((c) => c.id)).toEqual([
-      "conv_a",
+    // ids are most-recently-pinned-first: conv_a pinned last, conv_b earlier.
+    expect(orderByPinnedSequence([convA, convB], ["conv_a", "conv_b"]).map((c) => c.id)).toEqual([
       "conv_b",
+      "conv_a",
     ]);
   });
 
