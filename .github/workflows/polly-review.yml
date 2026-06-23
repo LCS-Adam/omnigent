@@ -429,6 +429,10 @@ jobs:
           sandbox = {
               'type': 'linux_bwrap',
               'egress_rules': egress_rules,
+              # Allow dotdirs under cwd that Polly needs. The default only
+              # includes .venv; the Claude and Codex CLIs are installed
+              # under .cc-cli and .codex-cli.
+              'cwd_allow_hidden': ['.venv', '.cc-cli', '.codex-cli', '.git'],
           }
           if credential_proxy:
               sandbox['credential_proxy'] = credential_proxy
