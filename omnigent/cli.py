@@ -2408,7 +2408,7 @@ def _ensure_backend(server: str | None) -> str:
         # otherwise the session-create call deep in the REPL bring-up
         # surfaces the edge redirect as an opaque non-JSON-response
         # traceback.
-        server = _workspace_api_server_url(_with_default_scheme(server))
+        server = _resolve_server_url(server)
         _ensure_databricks_server_auth(server)
         with runner_startup_progress(initial_message=STARTUP_PHASE_CONNECTING_REMOTE):
             _ensure_host_daemon(server)
@@ -4701,9 +4701,7 @@ def resume(
 
     run_resume(
         target=target,
-        # A schemeless or /omnigent web-UI workspace URL is normalized to the
-        # /api/2.0/omnigent mount (matches `omnigent login`).
-        server=_workspace_api_server_url(_with_default_scheme(server)) if server else server,
+        server=_resolve_server_url(server) if server else server,
     )
 
 
@@ -5405,9 +5403,7 @@ def _resolve_attach_server(server: str | None, configured_server: str | None) ->
     """
     chosen = server if server is not None else configured_server
     if chosen:
-        # A schemeless or /omnigent web-UI workspace URL is normalized to the
-        # /api/2.0/omnigent mount (matches `omnigent login`).
-        return _workspace_api_server_url(_with_default_scheme(chosen.rstrip("/")))
+        return _resolve_server_url(chosen)
     local = local_server_url_if_healthy()
     return local.rstrip("/") if local else None
 
@@ -5871,9 +5867,7 @@ def host(ctx: click.Context, server: str | None) -> None:
     if server is None:
         server = cfg.get("server")
     if server:
-        # A schemeless or /omnigent web-UI workspace URL is normalized to the
-        # /api/2.0/omnigent mount (matches `omnigent login`).
-        server = _workspace_api_server_url(_with_default_scheme(server))
+        server = _resolve_server_url(server)
 
     from omnigent.host.connect import run_host_process
 
@@ -5945,9 +5939,7 @@ def _resolve_host_server(server: str | None) -> str | None:
     if server is None:
         configured = _load_effective_config().get("server")
         server = str(configured) if configured else None
-    # A schemeless or /omnigent web-UI workspace URL is normalized to the
-    # /api/2.0/omnigent mount (matches `omnigent login`).
-    return _workspace_api_server_url(_with_default_scheme(server.rstrip("/"))) if server else None
+    return _resolve_server_url(server) if server else None
 
 
 def _daemon_base_url(record: _HostDaemonRecord) -> str | None:
@@ -10045,6 +10037,25 @@ def _workspace_api_server_url(server: str) -> str:
     return server
 
 
+def _resolve_server_url(server: str) -> str:
+    """
+    Normalize a user-supplied ``--server`` value to the Omnigent API base.
+
+    Every ``--server`` entry point (and ``login``) needs the same
+    normalization, so they all route through here: strip a trailing slash,
+    default a schemeless URL to ``https`` (``http`` for loopback hosts),
+    then expand a bare Databricks workspace URL — or the ``/omnigent``
+    web-UI URL the internal user guide hands out — to the
+    ``/api/2.0/omnigent`` mount.
+
+    :param server: A non-empty ``--server`` value, e.g.
+        ``"example.cloud.databricks.com/omnigent"``.
+    :returns: The normalized API base URL without a trailing slash, e.g.
+        ``"https://example.cloud.databricks.com/api/2.0/omnigent"``.
+    """
+    return _workspace_api_server_url(_with_default_scheme(server.rstrip("/")))
+
+
 def _databricks_workspace_login_target(server: str, probe: httpx.Response) -> str | None:
     """Return the workspace host when *server* sits behind Databricks auth.
 
@@ -10306,9 +10317,7 @@ def login(server_url: str) -> None:
     """
     import httpx as _httpx
 
-    # A schemeless URL defaults to https; a bare Databricks workspace URL
-    # (or its /omnigent web-UI URL) means its /api/2.0/omnigent mount.
-    server = _workspace_api_server_url(_with_default_scheme(server_url))
+    server = _resolve_server_url(server_url)
 
     # ── Step 0: Probe the server's auth mode. ──────────────────
     # /v1/me returns a JSON ``login_url`` on 401 — "/login" for

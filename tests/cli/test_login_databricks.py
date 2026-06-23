@@ -671,6 +671,32 @@ def test_with_default_scheme(raw: str, expected: str) -> None:
     assert cli_mod._with_default_scheme(raw) == expected
 
 
+def test_resolve_server_url_defaults_scheme_and_expands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared normalizer composes scheme-defaulting with expansion.
+
+    ``_resolve_server_url`` is the single seam every ``--server`` entry
+    point routes through; a schemeless bare host AND the guide's
+    ``/omnigent`` web URL both reach the ``/api/2.0/omnigent`` mount over
+    https.
+    """
+    import omnigent.cli as cli_mod
+
+    _scripted_normalizer_httpx(
+        monkeypatch,
+        {
+            f"{_WORKSPACE}/v1/me": _response(404, headers={"server": "databricks"}),
+            f"{_WORKSPACE_API_URL}/v1/me": _response(
+                401, headers={"www-authenticate": 'Bearer realm="DatabricksRealm"'}
+            ),
+        },
+    )
+
+    assert cli_mod._resolve_server_url("example.databricks.com") == _WORKSPACE_API_URL
+    assert cli_mod._resolve_server_url("example.databricks.com/omnigent") == _WORKSPACE_API_URL
+
+
 def test_workspace_url_expands_web_ui_path_to_api_mount(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
