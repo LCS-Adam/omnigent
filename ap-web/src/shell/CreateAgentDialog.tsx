@@ -24,10 +24,9 @@ import type { AgentBundleInput, MCPServerInput } from "@/lib/agentBundle";
  * Harness options for the picker. "default" uses the server's default
  * executor (no explicit harness in the bundle).
  */
-const HARNESS_OPTIONS: { value: string; label: string }[] = [
-  { value: "default", label: "Default" },
-  ...Object.entries(BRAIN_HARNESS_LABELS).map(([value, label]) => ({ value, label })),
-];
+const HARNESS_OPTIONS: { value: string; label: string }[] = Object.entries(
+  BRAIN_HARNESS_LABELS,
+).map(([value, label]) => ({ value, label }));
 
 /** A single MCP server row in the form. */
 interface MCPFormEntry {
@@ -116,7 +115,7 @@ export function CreateAgentDialog({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
-  const [harness, setHarness] = useState("default");
+  const [harness, setHarness] = useState(HARNESS_OPTIONS[0].value);
   const [mcpEntries, setMcpEntries] = useState<MCPFormEntry[]>([]);
   const [nextKey, setNextKey] = useState(0);
 
@@ -124,7 +123,7 @@ export function CreateAgentDialog({
     setName("");
     setDescription("");
     setInstructions("");
-    setHarness("default");
+    setHarness(HARNESS_OPTIONS[0].value);
     setMcpEntries([]);
     setNextKey(0);
   }
@@ -155,7 +154,7 @@ export function CreateAgentDialog({
       name: trimmedName,
       description: description.trim() || undefined,
       instructions: instructions.trim() || undefined,
-      harness: harness === "default" ? undefined : harness,
+      harness,
       mcpServers: toMCPInputs(mcpEntries),
     });
     reset();
@@ -209,7 +208,9 @@ export function CreateAgentDialog({
 
           {/* Harness */}
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-muted-foreground">Harness</label>
+            <label className="text-xs font-medium text-muted-foreground">
+              Harness <span className="text-destructive">*</span>
+            </label>
             <Select value={harness} onValueChange={setHarness}>
               <SelectTrigger data-testid="create-agent-harness" className="w-full">
                 <SelectValue />
