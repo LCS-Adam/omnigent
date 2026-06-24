@@ -1440,17 +1440,21 @@ def _signal_terminal_resolved_harness_elicitation(
     on reject the harness records a rejection result — so its arrival is
     a reliable "the terminal already resolved this" signal.
 
-    Correlation is by tool identity, never positional: a result only
-    resolves a parked prompt for the SAME ``tool_name`` in the same
-    session. That is what stops an unrelated auto-allowed tool's output
-    from clearing a different tool's pending prompt. Among
-    same-named parked prompts it prefers an exact ``tool_input`` match;
-    if none match exactly but exactly one same-named prompt is parked it
-    resolves that one (the hook payload and the transcript can serialize
-    identical input differently, so a single unambiguous candidate is
-    treated as the match). If several same-named prompts are parked and
-    none match by input it stays conservative and resolves none — the
-    web verdict or timeout still applies.
+    Correlation is by exact tool identity, never positional: a result
+    resolves a parked prompt only when it has the SAME ``tool_name`` AND
+    the SAME ``tool_input`` in the same session. Claude Code's
+    ``PermissionRequest`` payload carries no ``tool_use_id`` (the id is
+    minted only when the tool call is emitted, after the permission
+    check), so ``(tool_name, tool_input)`` is the only correlation signal
+    available — and both sides are unmodified JSON round-trips of the
+    same input, so exact equality holds whenever they describe the same
+    call. A non-matching or ambiguous result resolves nothing; the web
+    verdict or timeout still applies. Exact-only matching is what stops
+    one prompt's result from clearing a different prompt: approving
+    ``Bash{ls}`` in the web UI un-parks it, and mirroring its own output
+    must not then clear a still-pending ``Bash{pwd}`` sibling (an
+    unrelated auto-allowed same-named tool's output is harmless for the
+    same reason).
 
     Best-effort and idempotent: a no-op when no parked prompt matches
     (e.g. the web UI already resolved it, the tool needed no permission,
@@ -1477,8 +1481,23 @@ def _signal_terminal_resolved_harness_elicitation(
         if parked.tool_input == tool_input:
             parked.resolved_elsewhere.set()
             return
-    if len(candidates) == 1:
-        candidates[0].resolved_elsewhere.set()
+    # No exact input match. Correlation is exact-only: resolving a
+    # same-named-but-different-input prompt here would clear the wrong
+    # card, so leave every candidate to its own result / web verdict /
+    # timeout. This branch is reached routinely and benignly — e.g. after
+    # a sibling prompt was web-approved and un-parked, its mirrored output
+    # finds only the still-pending different-input prompt — so it logs at
+    # debug, not warning. (A genuine match failing to compare equal would
+    # also land here, but is indistinguishable from the benign case inside
+    # this call; both inputs are unmodified JSON round-trips, so such drift
+    # is not expected.)
+    _logger.debug(
+        "Mirrored %s result in %s matched no parked prompt by input "
+        "(%d same-named prompt(s) pending); leaving them to web verdict/timeout.",
+        tool_name,
+        session_id,
+        len(candidates),
+    )
 
 
 # Strong refs so deferred card-clear tasks aren't GC'd mid-sleep.
