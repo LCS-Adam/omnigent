@@ -1076,17 +1076,23 @@ class OpenAIAgentsSDKExecutor(Executor):
             return state
 
         underlying = _SanitizingSession(agents_sdk.SQLiteSession(session_key))
-        try:
-            from agents.memory import OpenAIResponsesCompactionSession
+        sdk_session: Any = underlying  # type: ignore[explicit-any]
+        # Enable SDK-native compaction only for direct OpenAI endpoints.
+        # Databricks-hosted endpoints don't support the responses.compact
+        # API, and the compaction model must be an OpenAI model name.
+        if not self._databricks:
+            try:
+                from agents.memory import OpenAIResponsesCompactionSession
 
-            sdk_session = OpenAIResponsesCompactionSession(
-                session_id=session_key,
-                underlying_session=underlying,
-            )
-        except (ImportError, AttributeError):
-            # Older SDK versions without compaction support — fall back
-            # to the plain session.
-            sdk_session = underlying
+                sdk_session = OpenAIResponsesCompactionSession(
+                    session_id=session_key,
+                    underlying_session=underlying,  # type: ignore[arg-type]  # ReplayItem ≡ TResponseInputItem at runtime
+                    client=self._client,
+                )
+            except (ImportError, AttributeError, ValueError):
+                # Older SDK versions or invalid model — fall back to
+                # the plain session.
+                pass
         state = _AgentsSessionState(sdk_session=sdk_session)
         self._session_states[session_key] = state
         return state
