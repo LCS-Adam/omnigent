@@ -122,6 +122,38 @@ def test_exact_input_match_resolves_only_that_prompt() -> None:
     assert not b.resolved_elsewhere.is_set()
 
 
+def test_no_input_prompt_resolved_by_empty_mirrored_output() -> None:
+    """
+    A prompt parked with no input (``tool_input=None`` — its hook payload
+    carried no ``tool_input``) is resolved by its mirrored result, whose
+    parsed arguments normalize to ``{}``. The park side spells "no input"
+    as ``None`` and the mirror side as ``{}``; both canonicalize to ``{}``
+    so they compare equal. Without that, ``None == {}`` is ``False`` and —
+    with no count-based fallback — the prompt would orphan until the hook
+    timeout.
+    """
+    a = _park("e_a", "Bash", None)
+
+    sessions_route._signal_terminal_resolved_harness_elicitation(SESSION, "Bash", {})
+
+    assert a.resolved_elsewhere.is_set()
+
+
+def test_no_input_prompt_not_cleared_by_result_with_input() -> None:
+    """
+    Canonicalizing ``None`` to ``{}`` must not over-match: a no-input
+    prompt is left pending by a same-named result that carried real input
+    (they describe different calls), even as the lone candidate.
+    """
+    a = _park("e_a", "Bash", None)
+
+    sessions_route._signal_terminal_resolved_harness_elicitation(
+        SESSION, "Bash", {"command": "ls"}
+    )
+
+    assert not a.resolved_elsewhere.is_set()
+
+
 def test_lone_same_name_prompt_with_different_input_is_not_resolved(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

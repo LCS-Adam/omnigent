@@ -1424,6 +1424,27 @@ async def _publish_and_wait_for_harness_elicitation(
                 )
 
 
+def _canonical_tool_input(tool_input: dict[str, Any] | None) -> dict[str, Any]:
+    """
+    Canonicalize a tool input for terminal-resolved correlation.
+
+    The park side records an absent / non-dict input as ``None`` (a
+    permission prompt whose hook payload carries no ``tool_input`` — see
+    the ``_publish_and_wait_for_harness_elicitation`` call sites), while
+    the mirror side normalizes the parsed transcript arguments to ``{}``
+    (see :func:`_drive_terminal_resolved_elicitation`). Both mean "no
+    input", so collapse them to ``{}`` before comparing — otherwise a
+    no-input prompt would never match its own mirrored result (``None ==
+    {}`` is ``False``) and, with no count-based fallback, would orphan
+    until the hook timeout.
+
+    :param tool_input: Parked or mirrored tool input, e.g.
+        ``{"command": "ls"}``, ``{}``, or ``None``.
+    :returns: The dict unchanged, or ``{}`` when it is ``None``.
+    """
+    return tool_input if isinstance(tool_input, dict) else {}
+
+
 def _signal_terminal_resolved_harness_elicitation(
     session_id: str,
     tool_name: str,
@@ -1448,8 +1469,11 @@ def _signal_terminal_resolved_harness_elicitation(
     check), so ``(tool_name, tool_input)`` is the only correlation signal
     available — and both sides are unmodified JSON round-trips of the
     same input, so exact equality holds whenever they describe the same
-    call. A non-matching or ambiguous result resolves nothing; the web
-    verdict or timeout still applies. Exact-only matching is what stops
+    call (absent input and empty input both canonicalize to ``{}`` via
+    :func:`_canonical_tool_input`, since the park and mirror sides spell
+    "no input" differently — ``None`` vs ``{}``). A non-matching or
+    ambiguous result resolves nothing; the web verdict or timeout still
+    applies. Exact-only matching is what stops
     one prompt's result from clearing a different prompt: approving
     ``Bash{ls}`` in the web UI un-parks it, and mirroring its own output
     must not then clear a still-pending ``Bash{pwd}`` sibling (an
@@ -1477,8 +1501,9 @@ def _signal_terminal_resolved_harness_elicitation(
     ]
     if not candidates:
         return
+    mirrored_input = _canonical_tool_input(tool_input)
     for parked in candidates:
-        if parked.tool_input == tool_input:
+        if _canonical_tool_input(parked.tool_input) == mirrored_input:
             parked.resolved_elsewhere.set()
             return
     # No exact input match. Correlation is exact-only: resolving a
