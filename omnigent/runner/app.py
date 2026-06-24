@@ -5161,6 +5161,108 @@ def get_session_agent_id(session_id: str) -> str | None:
     return _session_agent_ids_ref.get(session_id)
 
 
+def _should_skip_futile_recompaction(
+    provider_tokens: int | None, last_compacted_provider_tokens: int | None
+) -> bool:
+    """
+    Decide whether a provider-reported compaction trigger should be skipped
+    as futile.
+
+    Runner-side compaction rewrites the runner's own persisted history, but it
+    cannot shrink a harness's *own* session context (a resumed ``claude-sdk``
+    turn is sent only the latest user message; the SDK keeps its full context
+    by ``session_id``). So when the provider-reported fill has not dropped
+    since the last compaction, re-firing achieves nothing but cost and churn —
+    the harness must manage its own context (its own auto-compaction). Only the
+    ``provider_tokens`` path can loop this way; tiktoken-driven compaction of
+    the runner's own history genuinely shrinks it, so this guard never applies
+    there (``provider_tokens is None``).
+
+    :param provider_tokens: The current provider-reported context fill, or
+        ``None`` when no provider usage was reported (tiktoken path).
+    :param last_compacted_provider_tokens: The provider fill recorded at the
+        last successful compaction, or ``None`` if we have not compacted on a
+        provider-reported fill yet.
+    :returns: ``True`` when compaction should be skipped because the fill has
+        not decreased since the last compaction.
+    """
+    if provider_tokens is None or last_compacted_provider_tokens is None:
+        return False
+    return provider_tokens >= last_compacted_provider_tokens
+
+
+def _resolve_compaction_context(
+    cached_cc: dict[str, Any] | None,
+    spec: AgentSpec | None,
+    body_model: str | None,
+    turn_override: str | None,
+) -> dict[str, Any] | None:
+    """
+    Resolve the compaction-budget context entry for the current turn.
+
+    The compaction budget must size against the model the turn will ACTUALLY
+    run on: an active per-turn override (user ``/model`` or the advisor's
+    optimize verdict), else the spec model, else the request-body model. This
+    *effective model* is the cache key — recomputing whenever it changes covers
+    BOTH directions: pinning an override mid-session (override now differs from
+    the cached spec model) AND later clearing it (the effective model reverts to
+    the spec model, which differs from the cached override). The earlier guard
+    only fired while an override was active, so a cleared override kept budgeting
+    against the stale override window indefinitely — under-sizing the budget and
+    over-compacting, the exact failure this path exists to prevent. (The server
+    display ring recomputes from scratch each snapshot, so it self-corrected; the
+    runner cache did not.)
+
+    Mirrors the create-time pre-seed dict shape (``context_window`` / ``model`` /
+    ``config``) and prefers the spec's declared ``executor.context_window`` over
+    the catalog lookup (see :func:`resolve_effective_context_window`), except an
+    active override bypasses the declared window and sizes against the override
+    model's real catalog window.
+
+    :param cached_cc: The currently cached compaction context for the session,
+        or ``None`` when none is cached yet.
+    :param spec: The resolved agent spec, or ``None`` when unavailable.
+    :param body_model: The model carried on the request body (fallback when the
+        spec pins no model).
+    :param turn_override: The active per-turn model override, or ``None``.
+    :returns: The compaction-context entry to store — the unchanged ``cached_cc``
+        when the effective model has not changed (or no usable window resolves),
+        or a freshly computed entry otherwise. ``None`` only when there is no
+        cached entry and no usable window could be resolved.
+    """
+    from omnigent.llms.context_window import resolve_effective_context_window
+    from omnigent.runtime.workflow import _resolve_spec_model
+
+    model: str | None = None
+    spec_ctx_window: int | None = None
+    compaction_cfg = None
+    if spec is not None:
+        model = _resolve_spec_model(spec)
+        spec_ctx_window = spec.executor.context_window
+        compaction_cfg = spec.compaction
+    if not model:
+        model = body_model or "unknown"
+    effective_model = turn_override or model
+
+    if cached_cc is not None and cached_cc.get("model") == effective_model:
+        return cached_cc
+
+    ctx_window = resolve_effective_context_window(
+        spec_ctx_window, model, model_override=turn_override
+    )
+    if ctx_window is None:
+        # No usable window (e.g. no spec window and an unresolvable model):
+        # leave any existing cache as-is rather than dropping it.
+        return cached_cc
+    return {
+        "context_window": ctx_window,
+        # Store the effective model so count_tokens tokenizes against the
+        # model the turn actually runs on.
+        "model": effective_model,
+        "config": compaction_cfg,
+    }
+
+
 def create_runner_app(
     *,
     process_manager: HarnessProcessManager | None = None,

@@ -12368,6 +12368,44 @@ async def _handle_mcp_tools_call(
     )
 
 
+# Read uploads in 1 MiB chunks so an oversized body is aborted ~1 MiB past
+# the cap instead of being buffered whole (the previous unconditional
+# ``await file.read()`` was an OOM risk for very large uploads).
+_UPLOAD_READ_CHUNK_BYTES: int = 1024 * 1024
+
+
+async def _read_upload_capped(file: UploadFile, limit_bytes: int) -> bytes:
+    """
+    Read an uploaded file into memory, aborting if it exceeds *limit_bytes*.
+
+    Reads in :data:`_UPLOAD_READ_CHUNK_BYTES` chunks and raises HTTP 413 as
+    soon as the cap is crossed, so an oversized upload never buffers more
+    than one chunk past the limit.
+
+    :param file: The multipart upload.
+    :param limit_bytes: Maximum allowed size in bytes.
+    :returns: The full file content.
+    :raises HTTPException: 413 when the upload exceeds *limit_bytes*.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Attachment exceeds the {limit_bytes // (1024 * 1024)} MB "
+                    "limit for this file type."
+                ),
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def create_sessions_router(
     conversation_store: ConversationStore,
     agent_store: AgentStore,
@@ -15807,14 +15845,44 @@ def create_sessions_router(
                 "filename is required",
                 code=ErrorCode.INVALID_INPUT,
             )
-        content = await file.read()
         from omnigent.runtime.content_resolver import (
+            MAX_ATTACHMENT_UPLOAD_BYTES,
             _resolve_content_type,
+            attachment_text_type_for_extension,
+            attachment_upload_limit,
         )
 
+        # Resolve the type from the declared MIME + filename BEFORE reading
+        # the body, so an unsupported or oversized upload is rejected without
+        # buffering it. Attachments are inlined into the model context as
+        # base64 (see content_resolver.resolve_content_references); only
+        # images, PDF, and text/code files are usable — others (pptx, docx,
+        # zip, …) would be garbled or blow the request size, so reject them.
         content_type = _resolve_content_type(
             file.content_type,
             file.filename,
+        )
+        type_limit = attachment_upload_limit(content_type)
+        if type_limit is None:
+            # The browser/OS can mislabel a text/code file as binary (e.g. a
+            # .csv reported as application/vnd.ms-excel on Windows). Fall back
+            # to the extension — matching the web client's allowlist — and
+            # normalize the type so the resolver inlines it as text.
+            ext_type = attachment_text_type_for_extension(file.filename)
+            if ext_type is not None:
+                content_type = ext_type
+                type_limit = attachment_upload_limit(content_type)
+        if type_limit is None:
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"Unsupported attachment type '{content_type}'. Only images, "
+                    "PDF, and text/code files can be attached."
+                ),
+            )
+        content = await _read_upload_capped(
+            file,
+            min(type_limit, MAX_ATTACHMENT_UPLOAD_BYTES),
         )
         stored = file_store.create(
             session_id=session_id,
@@ -18745,28 +18813,33 @@ async def _get_session_snapshot(
                     if spec.name:
                         agent_name = spec.name
                     llm_model = spec.executor.model
-                    # Size the context ring against whatever the next turn
-                    # will actually run. spec.executor.context_window only
-                    # applies to spec.model, so it's bypassed when an
-                    # override is active.
-                    effective_model = (
-                        conv.model_override if conv.model_override is not None else llm_model
+                    from omnigent.llms.context_window import (
+                        resolve_effective_context_window,
                     )
-                    spec_cw = spec.executor.context_window
-                    if spec_cw is not None and conv.model_override is None:
-                        context_window = spec_cw
-                    elif effective_model is not None:
-                        from omnigent.llms.context_window import get_model_context_window
 
-                        # Offload to a worker thread: on a cache-cold
-                        # provider catalog this does a blocking HTTP fetch
-                        # (and litellm registry lookups are CPU-bound), so
-                        # running it inline would stall the single-worker
-                        # event loop and serialize every concurrent request
-                        # behind this snapshot.
-                        context_window = await asyncio.to_thread(
-                            get_model_context_window, effective_model
-                        )
+                    # Size the context ring against whatever the next turn will
+                    # actually run, using the SAME resolver the runner uses to
+                    # budget compaction. That makes the UI ring and the runner's
+                    # compaction trigger a single source of truth — computed by
+                    # one function — so they can't drift even though they run in
+                    # different processes at different times. (They previously
+                    # each inlined this rule and silently fell out of step; see
+                    # PR #769 review. Sharing the function removes the manual
+                    # sync.) spec.executor.context_window describes only the spec
+                    # model, so an active override bypasses it — the resolver
+                    # makes that decision from the spec model + override.
+                    #
+                    # Offload to a worker thread: an active override (or an
+                    # undeclared window) can trigger a cache-cold provider
+                    # catalog fetch (blocking HTTP / CPU-bound litellm) inside
+                    # the resolver, which would otherwise stall the single-worker
+                    # event loop and serialize every concurrent snapshot.
+                    context_window = await asyncio.to_thread(
+                        resolve_effective_context_window,
+                        spec.executor.context_window,
+                        llm_model,
+                        model_override=conv.model_override,
+                    )
         except Exception:  # noqa: BLE001 — best-effort; missing agent must not break session fetch
             pass
     # Skills are runner-owned: the bound runner discovers them against its
