@@ -275,8 +275,14 @@ def _populate_hermes_home(
         shutil.copy2(user_auth, hermes_home / "auth.json")
 
     # Pre-populate the allowlist so Hermes never prompts for consent.
+    # Hermes' allowlist format is {"approvals": [{"event": ..., "command": ...}]}.
     allowlist_path = hermes_home / "shell-hooks-allowlist.json"
-    allowlist_path.write_text(json.dumps({str(wrapper): True}) + "\n")
+    allowlist_data = {
+        "approvals": [
+            {"event": "pre_tool_call", "command": str(wrapper)},
+        ],
+    }
+    allowlist_path.write_text(json.dumps(allowlist_data, indent=2) + "\n")
 
 
 def _build_hermes_args(
@@ -385,6 +391,11 @@ class HermesExecutor(Executor):
         server_url = os.environ.get("RUNNER_SERVER_URL", "")
         conv_id = _get_conversation_id()
         if not server_url or not conv_id:
+            _logger.warning(
+                "Hermes policy hooks disabled: RUNNER_SERVER_URL=%r, conv_id=%r",
+                server_url or "(unset)",
+                conv_id or "(unset)",
+            )
             return
         self._hermes_home = Path(tempfile.mkdtemp(prefix="hermes_home_"))
         hook_script = str(Path(__file__).with_name("hermes_policy_hook.py"))
@@ -461,6 +472,9 @@ class HermesExecutor(Executor):
         proc_env: dict[str, str] | None = None
         if self._hermes_home is not None:
             proc_env = {**os.environ, "HERMES_HOME": str(self._hermes_home)}
+            _logger.info("Hermes using per-session HERMES_HOME=%s", self._hermes_home)
+        else:
+            _logger.warning("Hermes running WITHOUT per-session HERMES_HOME (no policy hooks)")
 
         _logger.debug("Hermes subprocess: %s", " ".join(args))
 

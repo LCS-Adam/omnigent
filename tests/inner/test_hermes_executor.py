@@ -161,7 +161,7 @@ class TestPopulateHermesHome:
         assert "/path/to/hook.py" in content
 
     def test_creates_allowlist(self, tmp_path: pathlib.Path) -> None:
-        """shell-hooks-allowlist.json is pre-populated."""
+        """shell-hooks-allowlist.json is pre-populated with correct format."""
         _populate_hermes_home(
             tmp_path,
             "/path/to/hook.py",
@@ -171,7 +171,10 @@ class TestPopulateHermesHome:
         allowlist_path = tmp_path / "shell-hooks-allowlist.json"
         assert allowlist_path.exists()
         allowlist = json.loads(allowlist_path.read_text())
-        assert any(allowlist.values())
+        approvals = allowlist["approvals"]
+        assert len(approvals) == 1
+        assert approvals[0]["event"] == "pre_tool_call"
+        assert "omnigent-policy-hook.sh" in approvals[0]["command"]
 
 
 # ---------------------------------------------------------------------------
