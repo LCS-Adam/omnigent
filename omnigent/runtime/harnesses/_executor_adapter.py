@@ -506,6 +506,28 @@ class ExecutorAdapter(HarnessApp):
             self._current_ctx = None
             self._current_agent = None
 
+    async def _handle_compact_event(self) -> Response:
+        """Forward explicit /compact to the inner executor."""
+        from fastapi.responses import JSONResponse
+
+        executor = self._ensure_executor()
+        result = None
+        try:
+            async for event in executor.compact(self._session_key):
+                if isinstance(event, CompactionComplete):
+                    result = {
+                        "summary": event.summary,
+                        "token_count": event.token_count,
+                        "model": event.model,
+                        "compacted_messages": event.compacted_messages,
+                    }
+                    break
+        except Exception:
+            _logger.debug("Explicit compaction failed", exc_info=True)
+        if result is not None:
+            return JSONResponse(status_code=200, content=result)
+        return Response(status_code=200)
+
     async def _handle_interrupt_event(self) -> Response:
         """Cancel the turn AND drop the inner executor session.
 

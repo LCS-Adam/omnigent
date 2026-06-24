@@ -1118,6 +1118,35 @@ class OpenAIAgentsSDKExecutor(Executor):
         self._session_states[session_key] = state
         return state
 
+    async def compact(self, session_key: str):  # type: ignore[override]
+        """Trigger explicit compaction via the SDK session's ``run_compaction``."""
+        from .executor import CompactionComplete
+
+        state = self._session_states.get(session_key)
+        if state is None:
+            return
+        session = state.sdk_session
+        run_compaction = getattr(session, "run_compaction", None)
+        if run_compaction is None:
+            return
+        try:
+            await run_compaction({"force": True})
+        except Exception:  # noqa: BLE001
+            logger.debug("Explicit compaction failed", exc_info=True)
+            return
+        # Read compacted state
+        _compacted = None
+        try:
+            _compacted = await session.get_items()
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to read compacted items", exc_info=True)
+        yield CompactionComplete(
+            summary="[OpenAI Responses API compaction — explicit /compact]",
+            token_count=0,
+            model=self._model_override,
+            compacted_messages=_compacted,
+        )
+
     async def close_session(self, session_key: str) -> None:
         self._session_states.pop(session_key, None)
 

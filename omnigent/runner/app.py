@@ -11297,17 +11297,37 @@ def create_runner_app(
         if body_type == "compact":
             # Omnigent server forwards explicit /compact here.
             # Native harnesses inject /compact into the tmux pane so
-            # the CLI compacts its own context. SDK harnesses manage
-            # compaction automatically (OpenAIResponsesCompactionSession /
-            # Claude SDK PreCompact hook) — return 200 to prevent the
-            # server from falling through to the now-removed server-side
-            # compact_conversation_now() path.
+            # the CLI compacts its own context.
             if _session_harness_name(conversation_id) == "claude-native":
                 return await _handle_claude_native_compact(conversation_id)
             if _session_harness_name(conversation_id) == "codex-native":
                 return await _handle_codex_native_compact(conversation_id)
-            # SDK harnesses: compaction is automatic, acknowledge the
-            # control so the server doesn't attempt its own compaction.
+            # Forward to harness subprocess for SDK harnesses.
+            try:
+                harness_client = await process_manager.get_client(conversation_id, "any")
+                resp = await harness_client.post(
+                    f"/v1/sessions/{conversation_id}/events",
+                    json={"type": "compact"},
+                    timeout=30.0,
+                )
+                if resp.status_code == 200 and resp.content:
+                    compact_data = resp.json()
+                    if compact_data and compact_data.get("summary"):
+                        _publish_event(
+                            conversation_id, {"type": "response.compaction.in_progress"}
+                        )
+                        await _handle_harness_compaction(
+                            conversation_id,
+                            {
+                                "summary": compact_data.get("summary"),
+                                "total_tokens": compact_data.get("token_count"),
+                                "summary_model": compact_data.get("model"),
+                                "compacted_messages": compact_data.get("compacted_messages"),
+                            },
+                        )
+                        _publish_event(conversation_id, {"type": "response.compaction.completed"})
+            except Exception:  # noqa: BLE001
+                _logger.debug("Compact forward failed for %s", conversation_id, exc_info=True)
             return Response(status_code=200)
 
         if body_type == "cost_approval_popup":

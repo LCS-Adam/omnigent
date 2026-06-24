@@ -582,6 +582,15 @@ class Executor:
         """Whether queued user input can be applied by interrupting after a tool boundary."""
         return False
 
+    async def compact(self, session_key: str) -> AsyncIterator[ExecutorEvent]:  # noqa: ARG002
+        """Trigger explicit compaction for *session_key*.
+
+        Yields CompactionComplete if compaction produced a result.
+        Default: no-op (yields nothing).
+        """
+        return
+        yield  # pragma: no cover
+
     def supports_stepwise_internal_turns(self) -> bool:
         """Whether the executor can pause and resume its own agent loop between turns."""
         return False
