@@ -3396,10 +3396,14 @@ def test_precompact_hook_does_not_emit_compaction_complete() -> None:
             self.result = result
             self.content = []
             self.model = "claude-test"
-            self.usage = type("U", (), {
-                "input_tokens": 500,
-                "output_tokens": 100,
-            })()
+            self.usage = type(
+                "U",
+                (),
+                {
+                    "input_tokens": 500,
+                    "output_tokens": 100,
+                },
+            )()
 
     class _SystemMessage:
         def __init__(self, subtype, data, hook_event_name=None):
@@ -3478,10 +3482,14 @@ def test_no_precompact_no_compaction_event() -> None:
             self.result = result
             self.content = []
             self.model = "claude-test"
-            self.usage = type("U", (), {
-                "input_tokens": 500,
-                "output_tokens": 100,
-            })()
+            self.usage = type(
+                "U",
+                (),
+                {
+                    "input_tokens": 500,
+                    "output_tokens": 100,
+                },
+            )()
 
     class _FakeSDK:
         AssistantMessage = type("AssistantMessage", (), {})

@@ -10546,16 +10546,13 @@ def create_runner_app(
                                                     "output": _item["output"],
                                                 }
                                             )
-                                elif (
-                                    _evt_type == "response.compaction.completed"
-                                    and event.get("summary")
+                                elif _evt_type == "response.compaction.completed" and event.get(
+                                    "summary"
                                 ):
                                     # A harness compacted its internal
                                     # context and is notifying the runner
                                     # so the compaction can be persisted.
-                                    await _handle_harness_compaction(
-                                        conv_id, event
-                                    )
+                                    await _handle_harness_compaction(conv_id, event)
 
                                 if is_action_required(event):
                                     tool_name = get_tool_name(event)

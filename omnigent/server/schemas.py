@@ -3220,7 +3220,6 @@ class CompactionFailedEvent(_SSEEventBase):
     type: Literal["response.compaction.failed"]
 
 
-
 class ClientTaskCancelEvent(_SSEEventBase):
     """
     Server-side request that the client cancel a tunneled tool call.

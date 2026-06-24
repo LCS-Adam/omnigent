@@ -1080,7 +1080,10 @@ class OpenAIAgentsSDKExecutor(Executor):
         # Enable SDK-native compaction only for direct OpenAI endpoints.
         # Databricks-hosted endpoints don't support the responses.compact
         # API, and the compaction model must be an OpenAI model name.
-        if not self._databricks:
+        # Mock / local servers also lack the endpoint, so gate on the
+        # real OpenAI hostname.
+        _base = str(getattr(self._client, "base_url", ""))
+        if not self._databricks and "api.openai.com" in _base:
             try:
                 from agents.memory import OpenAIResponsesCompactionSession
 

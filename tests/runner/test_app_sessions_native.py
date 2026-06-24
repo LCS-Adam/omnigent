@@ -5018,6 +5018,116 @@ class _OverflowThenSuccessHarnessClient:
         return _Response()
 
 
+def _build_interrupt_app(
+    gate: asyncio.Event,
+) -> tuple[FastAPI, _FakeProcessManager, _BlockingHarnessClient]:
+    """Build a runner app whose harness emits dangling function_calls.
+
+    The harness streams two ``function_call`` events before blocking
+    on *gate*. After the gate is released it streams
+    ``response.completed`` — but with no ``function_call_output`` for
+    either call, simulating an interrupted tool-chain.
+
+    :param gate: Event that unblocks the harness after the
+        function_call frames.
+    :returns: ``(app, process_manager, harness_client)`` tuple.
+    """
+    spec = AgentSpec(spec_version=1, name="t")
+    sse_frames = [
+        _sse({"type": "response.created", "response": {"id": "resp_int"}}),
+        _sse(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_a",
+                    "name": "read_file",
+                    "arguments": '{"path": "/tmp/x"}',
+                },
+            }
+        ),
+        # Gate blocks here (after frame index 1).
+        _sse(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_b",
+                    "name": "write_file",
+                    "arguments": '{"path": "/tmp/y"}',
+                },
+            }
+        ),
+        _sse({"type": "response.completed", "response": {"id": "resp_int"}}),
+    ]
+    harness_client = _BlockingHarnessClient(sse_frames, gate)
+    pm = _FakeProcessManager(harness_client)
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id
+        return spec
+
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    return app, pm, harness_client
+
+
+class _ForwardBlockingHarnessClient(_BlockingHarnessClient):
+    """Blocks the interrupt FORWARD (``.post``) so a test can assert it is awaited."""
+
+    def __init__(
+        self,
+        sse_frames: list[str],
+        gate: asyncio.Event,
+        fwd_gate: asyncio.Event,
+    ) -> None:
+        """
+        :param sse_frames: SSE frames returned by the harness stream.
+        :param gate: Event that releases the stream after the first frame.
+        :param fwd_gate: Event that releases a blocked interrupt forward.
+        """
+        super().__init__(sse_frames, gate)
+        self._fwd_gate = fwd_gate
+
+    async def post(self, url: str, *, json: dict[str, Any], timeout: Any = None) -> Any:
+        """Block an interrupt forward on ``fwd_gate``; pass other posts through."""
+        if isinstance(json, dict) and json.get("type") == "interrupt":
+            await self._fwd_gate.wait()
+        return await super().post(url, json=json, timeout=timeout)
+
+
+def _build_fwd_blocking_app(
+    gate: asyncio.Event,
+    fwd_gate: asyncio.Event,
+) -> tuple[FastAPI, _FakeProcessManager, _ForwardBlockingHarnessClient]:
+    """Build a runner app whose harness stream AND interrupt forward both block.
+
+    :param gate: Releases the harness stream (kept set-never so the turn blocks).
+    :param fwd_gate: Releases a blocked interrupt forward.
+    :returns: ``(app, process_manager, harness_client)`` tuple.
+    """
+    spec = AgentSpec(spec_version=1, name="t")
+    sse_frames = [
+        _sse({"type": "response.created", "response": {"id": "resp_fwd"}}),
+        _sse({"type": "response.completed", "response": {"id": "resp_fwd"}}),
+    ]
+    harness_client = _ForwardBlockingHarnessClient(sse_frames, gate, fwd_gate)
+    pm = _FakeProcessManager(harness_client)
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return spec
+
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    return app, pm, harness_client
+
 
 @pytest.mark.asyncio
 async def test_interrupt_forwards_to_harness_before_cancelling() -> None:
@@ -13583,6 +13693,42 @@ async def test_user_pin_suppresses_sticky_model_on_background_turn(
     assert pinned_verdict.applied is False, (
         "the pinned turn's verdict must be recorded as NOT applied"
     )
+
+
+# ── Per-session transcript-forwarder registry (double-mirror regression) ──
+
+
+@dataclass
+class _ForwarderRun:
+    """
+    One spawned transcript-forwarder stub run.
+
+    :param task: The asyncio task executing this run, captured via
+        ``asyncio.current_task()`` when the stub body starts. Used for
+        registry-independent cleanup.
+    :param cancelled: ``True`` once the parked run observed
+        :class:`asyncio.CancelledError`.
+    """
+
+    task: asyncio.Task[Any] | None = None
+    cancelled: bool = False
+
+
+async def _drain_forwarder_runs(runs: list[_ForwarderRun]) -> None:
+    """
+    Cancel and await any still-parked forwarder stub runs.
+
+    Test cleanup helper so a failed assertion never leaks a parked task
+    (or a registry entry) into the next test.
+
+    :param runs: Stub runs recorded by a parking forwarder fake.
+    :returns: None.
+    """
+    leftovers = [run.task for run in runs if run.task is not None and not run.task.done()]
+    for task in leftovers:
+        task.cancel()
+    if leftovers:
+        await asyncio.wait(leftovers)
 
 
 @pytest.mark.asyncio
