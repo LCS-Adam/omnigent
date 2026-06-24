@@ -453,7 +453,11 @@ export async function createBundledSession(
     const text = await res.text();
     throw new Error(`Failed to create bundled session: ${res.status} ${text}`);
   }
-  return (await res.json()) as { id: string };
+  // The multipart response uses `session_id` (CreatedSessionResponse),
+  // while the JSON path uses `id` (SessionResponse). Normalize to `id`
+  // so callers don't need to care which path was taken.
+  const body = (await res.json()) as { session_id: string };
+  return { id: body.session_id };
 }
 
 /**

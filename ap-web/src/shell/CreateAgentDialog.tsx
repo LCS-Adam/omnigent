@@ -116,6 +116,7 @@ export function CreateAgentDialog({
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
   const [harness, setHarness] = useState(HARNESS_OPTIONS[0].value);
+  const [model, setModel] = useState("claude-sonnet-4-20250514");
   const [mcpEntries, setMcpEntries] = useState<MCPFormEntry[]>([]);
   const [nextKey, setNextKey] = useState(0);
 
@@ -124,6 +125,7 @@ export function CreateAgentDialog({
     setDescription("");
     setInstructions("");
     setHarness(HARNESS_OPTIONS[0].value);
+    setModel("claude-sonnet-4-20250514");
     setMcpEntries([]);
     setNextKey(0);
   }
@@ -155,13 +157,14 @@ export function CreateAgentDialog({
       description: description.trim() || undefined,
       instructions: instructions.trim() || undefined,
       harness,
+      model: model.trim(),
       mcpServers: toMCPInputs(mcpEntries),
     });
     reset();
     onOpenChange(false);
   }
 
-  const canSubmit = name.trim().length > 0;
+  const canSubmit = name.trim().length > 0 && model.trim().length > 0;
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -223,6 +226,20 @@ export function CreateAgentDialog({
                 ))}
               </SelectContent>
             </Select>
+          </div>
+
+          {/* Model */}
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="create-agent-model" className="text-xs font-medium text-muted-foreground">
+              Model <span className="text-destructive">*</span>
+            </label>
+            <Input
+              id="create-agent-model"
+              data-testid="create-agent-model"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="claude-sonnet-4-20250514"
+            />
           </div>
 
           {/* Instructions / System Prompt */}
