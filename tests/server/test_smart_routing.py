@@ -85,9 +85,9 @@ def test_infer_tiers_claude_sdk() -> None:
     assert any("opus" in m for m in tiers["expensive"])
 
 
-def test_infer_tiers_claude_native() -> None:
-    tiers = infer_tiers("claude-native")
-    assert tiers is not None
+def test_infer_tiers_native_harnesses() -> None:
+    assert infer_tiers("claude-native") is not None
+    assert infer_tiers("codex-native") is not None
 
 
 def test_infer_tiers_codex() -> None:
