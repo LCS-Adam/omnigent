@@ -49,7 +49,7 @@ That is why streaming/policy/compaction are clean there.
 | # | Gap | Verified state on native | Plan |
 |---|---|---|---|
 | 1 | **Omnigent policies** | ✗ — no Omnigent eval; goose's own `GOOSE_MODE` gates | **§3 — fill on native** (the hard one) |
-| 2 | **Model override** | ✗ — *bug*: model not threaded to `GOOSE_MODEL` at launch | §4.1 — fill |
+| 2 | **Model override** | ✗ — goose owns provider/model via `goose configure` | §4.1 — **skip (decided)**; steer to headless |
 | 3 | **Reasoning** (P1) | ✗ — thinking *is* persisted, forwarder drops it | §4.2 — fill |
 | 4 | **Cost tracking** (P1) | ✗ — `accumulated_cost`/tokens in store, not forwarded | §4.3 — fill |
 | 5 | **Resume / fork** (fork P1) | resume ✓; fork ✗ | §4.4 — fill |
@@ -165,10 +165,17 @@ Key properties:
   post-hoc `toolResponse` audit evaluation (`PHASE_TOOL_RESULT`,
   non-blocking/observability-only) after all enforcement + gap-fills are working.
 - **Latency / chattiness.** `approve` mode prompts on every tool; each adds a
-  policy round-trip + a cliclack drive. **Decision (v1):** fast-path "no policies
-  configured for this session → auto-drive Allow without the round-trip," so the
-  per-tool cost is paid only when policies actually exist. Most matched calls
-  still resolve to auto-ALLOW server-side (fast).
+  policy round-trip + a cliclack drive. **Decision (v1):** `GOOSE_MODE=approve`
+  is set **unconditionally** — NOT gated on whether policies exist. Gating it
+  ("smart_approve when no policies") would open a correctness hole: a policy
+  added mid-session via `sys_add_policy` wouldn't enforce on tools goose
+  auto-allows. The per-tool cost is the price of the always-enforce guarantee.
+  The eval round-trip is localhost-cheap — the engine short-circuits no-agent →
+  `UNSPECIFIED` and no-match → `ALLOW` without an LLM call — so a separate
+  caching fast-path is deferred (it adds staleness risk for little gain; the
+  dominant cost is the inherent prompt-drive cycle, which the fast-path can't
+  remove). Verdict mapping: `ALLOW`/`UNSPECIFIED` → drive Allow; `DENY` → drive
+  Deny; transport/parse error → fail-closed Deny.
 - **Scrape brittleness remains** for prompt *detection* and *actuation* (the
   cliclack strings are stable per the source, but it is still screen-driving).
   The decision path is now robust (structured + engine); only the actuator is
@@ -178,20 +185,23 @@ Key properties:
 
 ## 4. Tier 1 — P1 + the launch bug (all native, all independently shippable)
 
-### 4.1 Model override (it's a bug)
+### 4.1 Model override — skipped for native (decided)
 
-`build_goose_native_spawn_env` accepts `model=` and sets `GOOSE_MODEL`
-(`goose_native_bridge.py:99`), but the runner calls it **without** the model
-override (`runner/app.py:8111`, `:12874`), so the user's model pick never
-reaches goose — it silently uses its configured default.
+**Decision: goose-native does NOT support an Omnigent model override.** goose's
+provider *and* model live in the user's `goose configure` keyring/config, and
+goose has no `--model` flag — so Omnigent setting `GOOSE_MODEL` can't reliably
+pick a model valid for the user's configured provider (Omnigent can't know it).
+Forcing it risks an invalid model that breaks the turn. Mid-session switch is
+impossible regardless (goose reads `GOOSE_MODEL` only at launch — no ACP
+`set_model`, no `/model` command).
 
-- **Fix:** thread `model_override → GOOSE_MODEL` at spawn (both call sites). Add
-  goose provider/model entries to `model_catalog.py`.
-- **Mid-session switch:** not possible — goose reads `GOOSE_MODEL` only at launch
-  (no ACP `set_model`, no `/model` command). The only honest implementation is
-  relaunch + history replay, which reuses the §4.4 fork/resume machinery. Scope
-  mid-session as a follow-up, not Tier 1.
-- Effort: launch fix ~½ day; catalog ~½ day. Risk: low.
+- **Implementation:** `harness_supports_model_override("goose-native")` now
+  returns `False` (`model_override.py`), so the web picker doesn't offer a model
+  for goose-native and the dispatch-time gate rejects a stray persisted value
+  rather than silently dropping it. goose-native uses whatever `goose configure`
+  set.
+- **Steer:** users who need per-session model switching should pick the headless
+  `goose` harness, which threads the model via `HARNESS_GOOSE_MODEL`.
 
 ### 4.2 Reasoning forwarding (P1) — the corrected finding
 
