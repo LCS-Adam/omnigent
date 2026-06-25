@@ -327,6 +327,7 @@ _NATIVE_RELAY_BUILTIN_TOOLS = (
     | _TERMINAL_TOOLS
 )
 
+
 def build_native_relay_tool_schemas(spec: Any | None) -> list[dict[str, Any]]:
     """Build the flat Omnigent tool surface for native harness bridges.
 
