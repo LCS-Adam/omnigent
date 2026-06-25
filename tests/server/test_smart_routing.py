@@ -108,7 +108,7 @@ def test_infer_tiers_codex() -> None:
     tiers = infer_tiers("codex")
     assert tiers is not None
     assert any("gpt" in m for m in tiers["cheap"])
-    assert any("gpt-5" in m for m in tiers["expensive"])
+    assert any("gpt-5-5" in m for m in tiers["expensive"])
 
 
 def test_infer_tiers_openai_agents() -> None:
