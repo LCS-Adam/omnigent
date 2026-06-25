@@ -115,6 +115,43 @@ _CODEX_ELICITATION_REQUEST_METHODS = frozenset(
     }
 )
 
+# Error-item classification (#1108). Codex can complete a turn that carries an
+# ``item/completed`` ``error`` item but still report the turn as a clean
+# ``turn/completed`` — a "silent success". The forwarder forces such turns to
+# ``failed`` and surfaces the reason. ``_CODEX_ERROR_ITEM_TYPE`` is the Codex
+# item type that marks a turn-level error.
+_CODEX_ERROR_ITEM_TYPE = "error"
+# Substrings (matched case-insensitively against the error message) that mark an
+# error as authentication-related, so the surface can include a re-auth hint.
+# Kept deliberately broad: Codex auth failures surface in several phrasings
+# (expired ChatGPT login, 401/403 from the responses API, "run codex login").
+_CODEX_AUTH_ERROR_FRAGMENTS = (
+    "401",
+    "403",
+    "unauthorized",
+    "authentication",
+    "not logged in",
+    "not authenticated",
+    "log in",
+    "login",
+    "sign in",
+    "re-authenticate",
+    "reauthenticate",
+    "credentials",
+    "access token",
+    "token expired",
+    "expired token",
+    "session expired",
+    "api key",
+)
+# Surfaced classifications for a terminal error item.
+_CODEX_ERROR_KIND_AUTH = "auth"
+_CODEX_ERROR_KIND_GENERIC = "generic"
+# Re-auth hint appended to the surfaced status output for an auth-classified
+# error so the web UI / parent can prompt the user to re-authenticate. Phase 1
+# is surface-only: no automatic ``codex login`` is triggered.
+_CODEX_REAUTH_HINT = "Codex needs you to re-authenticate. Run `codex login` and retry."
+
 
 @dataclass
 class _ForwarderTarget:
@@ -636,6 +673,102 @@ class _CodexForwarderState:
 
 
 @dataclass(frozen=True)
+class _CodexTerminalError:
+    """
+    A turn-level error item surfaced from a Codex turn (#1108).
+
+    Produced by :func:`_terminal_error_from_turn` when a turn carries an
+    ``item/completed`` ``error`` item. Forces the turn's Omnigent status to
+    ``failed`` and lets :func:`_post_turn_status_edge` surface the reason
+    (and a re-auth hint for auth-classified errors).
+
+    :param message: Human-readable error text from the Codex error item,
+        e.g. ``"401 Unauthorized: ChatGPT login expired"``.
+    :param kind: Classification, either ``"auth"`` or ``"generic"``, from
+        the shared :func:`_classify_codex_error` classifier.
+    """
+
+    message: str
+    kind: str
+
+    @property
+    def is_auth(self) -> bool:
+        """:returns: ``True`` when the error was classified as auth-related."""
+        return self.kind == _CODEX_ERROR_KIND_AUTH
+
+
+def _classify_codex_error(message: str) -> str:
+    """
+    Classify a Codex error message as auth-related or generic.
+
+    Single shared classifier reused by both the live terminal path and the
+    ``thread/resume`` parity path so the two never diverge. Matching is
+    case-insensitive substring containment against
+    :data:`_CODEX_AUTH_ERROR_FRAGMENTS`.
+
+    :param message: Error message text, e.g.
+        ``"401 Unauthorized: please run codex login"``.
+    :returns: :data:`_CODEX_ERROR_KIND_AUTH` when any auth fragment matches,
+        otherwise :data:`_CODEX_ERROR_KIND_GENERIC`.
+    """
+    lowered = message.lower()
+    for fragment in _CODEX_AUTH_ERROR_FRAGMENTS:
+        if fragment in lowered:
+            return _CODEX_ERROR_KIND_AUTH
+    return _CODEX_ERROR_KIND_GENERIC
+
+
+def _error_message_from_item(item: dict[str, Any]) -> str:
+    """
+    Extract a human-readable message from a Codex ``error`` item.
+
+    Codex error items have surfaced the text under a few keys across
+    app-server versions (``message``, ``error``, ``text``); this reads the
+    first non-empty string, falling back to a stable generic message so the
+    surfaced error is never blank (``ErrorData`` rejects empty text).
+
+    :param item: A Codex ``item/completed`` item with ``type == "error"``.
+    :returns: Non-empty error message text.
+    """
+    for key in ("message", "error", "text", "detail"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "Codex turn ended with an unspecified error."
+
+
+def _terminal_error_from_turn(params: dict[str, Any]) -> _CodexTerminalError | None:
+    """
+    Return the first turn-level error item from a Codex turn, if any (#1108).
+
+    Scans ``params['turn']['items']`` for an item whose ``type`` is
+    :data:`_CODEX_ERROR_ITEM_TYPE` and classifies it via the shared
+    :func:`_classify_codex_error`. This is the single source of truth for
+    "did this turn actually contain an error", reused by both the live
+    terminal edge and the ``thread/resume`` parity path.
+
+    :param params: Codex turn params, e.g. a ``turn/completed`` payload or a
+        single ``thread/resume`` turn wrapped as ``{"turn": <turn>}``.
+    :returns: The classified terminal error, or ``None`` when the turn has no
+        error item.
+    """
+    turn = params.get("turn")
+    if not isinstance(turn, dict):
+        return None
+    items = turn.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != _CODEX_ERROR_ITEM_TYPE:
+            continue
+        message = _error_message_from_item(item)
+        return _CodexTerminalError(message=message, kind=_classify_codex_error(message))
+    return None
+
+
+@dataclass(frozen=True)
 class _CodexTurnStatusEdge:
     """
     Omnigent session-status edge derived from Codex turn lifecycle state.
@@ -645,11 +778,15 @@ class _CodexTurnStatusEdge:
         ``"turn_abc123"``.
     :param source: Lifecycle source that produced the edge, e.g.
         ``"turn/started"``.
+    :param error: Turn-level error forcing this edge to ``failed`` (#1108),
+        or ``None`` for ordinary lifecycle edges. Surfaced as the status
+        output by :func:`_post_turn_status_edge`.
     """
 
     status: str
     turn_id: str | None
     source: str
+    error: _CodexTerminalError | None = None
 
 
 # Codex ``item/completed`` item types that represent a built-in tool call.
@@ -1910,10 +2047,14 @@ def _resume_terminal_status_edge_for_latest_turn(
         if status is None:
             return None
         update_active_turn_id(bridge_dir, None)
+        # #1108: parity with the live path — surface the error item (if any)
+        # that forced this resume turn to ``failed``.
+        error = _terminal_error_from_turn({"turn": turn})
         return _CodexTurnStatusEdge(
             status=status,
             turn_id=turn_id,
-            source="thread/resume",
+            source="thread/resume:error-item" if error is not None else "thread/resume",
+            error=error,
         )
     return None
 
@@ -1922,11 +2063,19 @@ def _omnigent_status_from_resume_turn(turn: dict[str, Any]) -> str | None:
     """
     Convert an explicit Codex resume turn status to Omnigent session status.
 
+    Applies the same error-item check as the live terminal path
+    (:func:`_terminal_turn_status_edge`) so a resumed turn that carried an
+    ``error`` item maps to ``failed`` even when Codex recorded its status as
+    ``completed`` — the resume-path side of the #1108 "silent success" fix.
+
     :param turn: Codex resume turn object, e.g.
         ``{"id": "turn_123", "status": "completed"}``.
     :returns: Omnigent status literal for terminal turns, or ``None`` for active
         or unrecognized statuses.
     """
+    # An error item forces ``failed`` regardless of the recorded turn status.
+    if _terminal_error_from_turn({"turn": turn}) is not None:
+        return "failed"
     status = turn.get("status")
     if isinstance(status, dict):
         status = status.get("type") or status.get("status")
@@ -3197,11 +3346,53 @@ def _terminal_turn_status_edge(
         source = f"{method}:recovered"
     else:
         source = method
+    # #1108: a turn that carries an ``error`` item is a failure even if Codex
+    # reported it via ``turn/completed`` ("silent success"). Force ``failed``
+    # and attach the classified error so the reason is surfaced downstream.
+    error = _terminal_error_from_turn(params)
+    if error is not None:
+        _logger.info(
+            "Codex forwarder forcing failed status from error item: turn_id=%s method=%s kind=%s",
+            terminal_turn_id,
+            method,
+            error.kind,
+        )
+        return _CodexTurnStatusEdge(
+            status="failed",
+            turn_id=terminal_turn_id,
+            source=f"{source}:error-item",
+            error=error,
+        )
+    if method == "turn/completed" and _turn_items_are_empty(params):
+        _logger.warning(
+            "Codex forwarder observed an empty turn (zero items): "
+            "turn_id=%s method=%s; mapping to idle",
+            terminal_turn_id,
+            method,
+        )
     return _CodexTurnStatusEdge(
         status="idle" if method == "turn/completed" else "failed",
         turn_id=terminal_turn_id,
         source=source,
     )
+
+
+def _turn_items_are_empty(params: dict[str, Any]) -> bool:
+    """
+    Report whether a Codex turn explicitly carried zero items (#1108).
+
+    Only an explicitly present but empty ``items`` list counts as "empty":
+    a missing ``items`` key (e.g. a legacy ``turnId``-only terminal
+    notification) is unknown, not empty, and must not trip the WARN.
+
+    :param params: Codex turn event params.
+    :returns: ``True`` when ``params['turn']['items']`` is a zero-length list.
+    """
+    turn = params.get("turn")
+    if not isinstance(turn, dict):
+        return False
+    items = turn.get("items")
+    return isinstance(items, list) and len(items) == 0
 
 
 def _terminal_turn_id_from_params(params: dict[str, Any]) -> str | None:
@@ -4513,6 +4704,8 @@ async def _post_status(
     status: str,
     *,
     response_id: str | None = None,
+    output: str | None = None,
+    reauth_required: bool = False,
 ) -> None:
     """
     Publish a native Codex status edge.
@@ -4522,11 +4715,21 @@ async def _post_status(
     :param status: Session status, e.g. ``"running"``.
     :param response_id: Optional response id for this status edge,
         e.g. ``"codex_turn_abc123"``.
+    :param output: Optional human-readable reason carried with a terminal
+        edge, e.g. a Codex error message (#1108). The server forwards this as
+        the authoritative terminal output for a ``failed`` / ``idle`` edge.
+    :param reauth_required: When ``True``, mark a ``failed`` edge as caused by
+        an authentication error so the surface can prompt a re-auth (#1108).
+        Surface-only: no automatic ``codex login`` is triggered.
     :returns: None.
     """
-    data = {"status": status}
+    data: dict[str, Any] = {"status": status}
     if response_id is not None:
         data["response_id"] = response_id
+    if output is not None:
+        data["output"] = output
+    if reauth_required:
+        data["reauth_required"] = True
     response = await _post_session_event(
         client,
         session_id,
@@ -4544,6 +4747,11 @@ async def _post_turn_status_edge(
     """
     Publish one Codex turn lifecycle edge if a valid edge was derived.
 
+    When the edge carries a turn-level error (#1108), the error message is
+    surfaced as the terminal ``output`` so the failure reason is visible
+    rather than silently swallowed; an auth-classified error additionally
+    flags ``reauth_required`` and appends a re-auth hint to the output.
+
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param edge: Derived lifecycle edge, or ``None`` when no status should
@@ -4559,7 +4767,21 @@ async def _post_turn_status_edge(
         edge.status,
     )
     response_id = _response_id(_params_with_turn_id({}, edge.turn_id)) if edge.turn_id else None
-    await _post_status(client, session_id, edge.status, response_id=response_id)
+    output: str | None = None
+    reauth_required = False
+    if edge.error is not None:
+        output = edge.error.message
+        if edge.error.is_auth:
+            reauth_required = True
+            output = f"{output}\n\n{_CODEX_REAUTH_HINT}"
+    await _post_status(
+        client,
+        session_id,
+        edge.status,
+        response_id=response_id,
+        output=output,
+        reauth_required=reauth_required,
+    )
 
 
 async def _post_external_elicitation_resolved(

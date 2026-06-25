@@ -5764,6 +5764,67 @@ async def test_compaction_item_in_history_expands_and_discards_prior() -> None:
 
 
 @pytest.mark.asyncio
+async def test_error_item_in_history_is_surfaced_not_dropped() -> None:
+    """History loading surfaces ``error`` items instead of silently dropping them (#1108).
+
+    Breakage this catches: ``_convert_raw_items_to_input`` used to drop every
+    item that wasn't message / function_call / function_call_output, so an
+    ``error`` item recorded for a failed turn vanished on history reload — the
+    next turn replayed as if the failure had never happened ("silent success").
+    The converter now maps each error item to a visible message block, so the
+    failure reason reaches the harness input.
+    """
+    import asyncio as _aio
+
+    history = [
+        {
+            "id": "item_1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "do the thing"}],
+        },
+        {
+            "id": "item_2",
+            "type": "error",
+            "response_id": "resp_failed",
+            "source": "execution",
+            "code": "codex_turn_error",
+            "message": "401 Unauthorized: ChatGPT login expired",
+        },
+        {
+            "id": "item_3",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "try again"}],
+        },
+    ]
+    app, _pm, hc = _build_recovery_app(history)
+
+    async with _runner_client(app) as client:
+        # Trailing user message → crash recovery starts a turn, replaying history.
+        resp = await client.post(
+            "/v1/sessions",
+            json={"session_id": "conv_err_1", "agent_id": "ag_1"},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["status"] == "running"
+        await _aio.sleep(0.5)
+
+    assert len(hc.posted_bodies) == 1, (
+        f"Expected 1 harness POST (recovery turn), got {len(hc.posted_bodies)}."
+    )
+    content = hc.posted_bodies[0].get("content", [])
+    all_texts = json.dumps(content)
+    # The error message survived the converter rather than being dropped.
+    assert "401 Unauthorized: ChatGPT login expired" in all_texts, (
+        "Error item was dropped from harness input — the silent-success "
+        "regression. _convert_raw_items_to_input must surface error items."
+    )
+    # The stable error code is included so the reason is attributable.
+    assert "codex_turn_error" in all_texts
+
+
+@pytest.mark.asyncio
 async def test_crash_recovery_with_compaction_uses_post_compaction_history() -> None:
     """Crash recovery after compaction sees only post-compaction items.
 

@@ -8827,7 +8827,12 @@ def create_runner_app(
         _skipped_types: list[str] = []
         for item in remaining:
             item_type = item.get("type")
-            if item_type not in ("message", "function_call", "function_call_output"):
+            if item_type not in (
+                "message",
+                "function_call",
+                "function_call_output",
+                "error",
+            ):
                 _skipped_types.append(str(item_type))
             if item_type == "message":
                 result.append(
@@ -8852,6 +8857,26 @@ def create_runner_app(
                         "type": "function_call_output",
                         "call_id": item.get("call_id"),
                         "output": item.get("output"),
+                    }
+                )
+            elif item_type == "error":
+                # #1108: error items used to be silently dropped here, so a
+                # turn that actually failed replayed as if it had never erred
+                # ("silent success"). Surface each error item as a visible
+                # message block so the failure reason survives history reload
+                # and the next turn sees it rather than a clean slate.
+                message = item.get("message")
+                code = item.get("code")
+                text = message if isinstance(message, str) and message else "unknown error"
+                if isinstance(code, str) and code:
+                    text = f"[Error: {code}] {text}"
+                else:
+                    text = f"[Error] {text}"
+                result.append(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}],
                     }
                 )
         if _skipped_types:
