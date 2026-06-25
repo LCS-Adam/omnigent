@@ -37,6 +37,8 @@ from pathlib import Path
 
 import httpx
 
+from omnigent.cursor_native_bridge import FORK_HISTORY_CLOSE_TAG, FORK_HISTORY_OPEN_TAG
+
 _logger = logging.getLogger(__name__)
 
 #: Seconds between store polls. Goose flushes a ``messages`` row per agentic
@@ -74,6 +76,20 @@ def _warn_sqlite_once(context: str, exc: sqlite3.Error) -> None:
 # before pasting into the TUI; strip them from the mirrored bubble (the path is
 # an internal bridge detail).
 _ATTACHMENT_MARKER_RE = re.compile(r"\[Attached:[^\]]*\]")
+
+# On a fork into goose, the executor prepends the prior conversation to the first
+# user message, fenced in <omnigent_fork_history>…</omnigent_fork_history>
+# (cursor_native_bridge.wrap_fork_preamble — shared across native harnesses).
+# goose stores it in the user message; strip the whole block so the mirrored
+# bubble shows only the user's real text (the copied history already lives in the
+# Omnigent timeline from the fork). Non-greedy → stops at the first (real) close
+# tag; the trailing alternative degrades an unterminated block to end-of-text.
+# Mirrors :data:`omnigent.cursor_native_forwarder._FORK_HISTORY_RE`.
+_FORK_HISTORY_RE = re.compile(
+    rf"{re.escape(FORK_HISTORY_OPEN_TAG)}.*?{re.escape(FORK_HISTORY_CLOSE_TAG)}"
+    rf"|{re.escape(FORK_HISTORY_OPEN_TAG)}.*",
+    re.DOTALL,
+)
 
 
 def default_sessions_db() -> Path:
@@ -409,6 +425,10 @@ def _message_to_item(
     text = _ATTACHMENT_MARKER_RE.sub("", _content_text(content_json)).strip()
     response_id = f"goose:{msg_id}"
     if role == "user":
+        # A fork's first user message carries the prior conversation as a fenced
+        # preamble (see the executor); strip it so the bubble shows only the
+        # user's real text — the copied history is already in the timeline.
+        text = _FORK_HISTORY_RE.sub("", text).strip()
         if not text:
             return None
         return _MirrorItem(

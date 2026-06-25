@@ -111,6 +111,22 @@ def test_message_to_item_tool_only_still_skipped() -> None:
     assert f._message_to_item(9, "assistant", cj, "a") is None
 
 
+def test_message_to_item_strips_fork_history_preamble() -> None:
+    from omnigent.cursor_native_bridge import wrap_fork_preamble
+
+    # A fork's first user message arrives with the prior transcript fenced inside
+    # <omnigent_fork_history>…</omnigent_fork_history>; the mirror must show only
+    # the user's real text (the history already lives in the timeline).
+    injected = wrap_fork_preamble("You: hi\n\nAssistant: hello", "my real question")
+    cj = json.dumps([{"type": "text", "text": injected}])
+    item = f._message_to_item(3, "user", cj, "a")
+    assert item is not None
+    out = item.item_data["content"][0]["text"]
+    assert out == "my real question"
+    assert "You: hi" not in out
+    assert "omnigent_fork_history" not in out
+
+
 def test_resolve_session_id_by_name(tmp_path: Path) -> None:
     db = tmp_path / "sessions.db"
     _seed_db(db)

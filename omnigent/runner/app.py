@@ -1964,12 +1964,16 @@ async def _auto_create_goose_terminal(
     # drop the prior terminal's stale forward cursor.
     await _cancel_auto_forwarder_task(session_id)
     from omnigent.goose_native_bridge import bridge_dir_for_session_id, write_tmux_target
+    from omnigent.cursor_native_bridge import clear_fork_preamble
     from omnigent.goose_native_forwarder import clear_goose_bridge_state
     from omnigent.goose_native_usage import clear_goose_usage_state
 
     bridge_dir = bridge_dir_for_session_id(session_id)
     clear_goose_bridge_state(bridge_dir)
     clear_goose_usage_state(bridge_dir)
+    # Drop any stale fork preamble; the fork-carry block below re-writes it when
+    # this launch is actually a fork.
+    clear_fork_preamble(bridge_dir)
 
     # Wire the Omnigent MCP server so goose gets the sys_*/comment/web tools the
     # other native harnesses expose. goose loads it as a stdio extension; we point
@@ -1996,6 +2000,29 @@ async def _auto_create_goose_terminal(
         server_client=server_client,
     )
     workspace = os.path.realpath(str(launch_config.workspace))
+
+    # A fork into goose carries history as a text preamble: a fresh
+    # ``goose session --name <fork>`` has no prior history, so render the copied
+    # Omnigent items and stash them; the executor prepends them to the fork's
+    # first injected message (the forwarder strips the sentinel block on mirror).
+    # Reuses the shared cursor-native fork helpers. Best-effort — a failure just
+    # starts the fork without prior context.
+    if launch_config.fork_carry_history and server_client is not None:
+        try:
+            from omnigent.claude_native import _fetch_all_session_items_for_claude_resume
+            from omnigent.cursor_native_bridge import write_fork_preamble
+
+            fork_items = await _fetch_all_session_items_for_claude_resume(
+                server_client, session_id
+            )
+            write_fork_preamble(bridge_dir, _cursor_fork_history_preamble(fork_items))
+        except Exception:  # noqa: BLE001 — context carry-over is best-effort
+            _logger.warning(
+                "goose-native: could not build fork history preamble (session=%s).",
+                session_id,
+                exc_info=True,
+            )
+
     goose_command = resolve_goose_executable()
     # GOOSE_MODE=approve so Goose prompts in its TUI before EVERY tool. This is
     # required for complete Omnigent-policy interception: smart_approve lets Goose
