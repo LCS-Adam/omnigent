@@ -14757,10 +14757,7 @@ def create_sessions_router(
                 async with _native_ask_gate_lock(session_id, result.deciding_policy):
                     engine = _build_engine()
                     result = await engine.evaluate(ctx, read_only=is_read_only)
-                    if (
-                        result.action == PolicyAction.ASK
-                        and phase in _NATIVE_ASK_GATE_PHASES
-                    ):
+                    if result.action == PolicyAction.ASK and phase in _NATIVE_ASK_GATE_PHASES:
                         approved = await _hold_native_ask_gate(
                             request,
                             session_id=session_id,
