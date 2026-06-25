@@ -2428,6 +2428,22 @@ async def _forward_available_status_events(
                         compaction_status,
                         exc_info=True,
                     )
+                # Persist a compaction item so session resume knows
+                # the compaction boundary. Without this, rebuilding
+                # the transcript from the conversation DB loads the
+                # full pre-compaction history.
+                if compaction_status == "completed":
+                    try:
+                        await _persist_native_compaction_item(
+                            client,
+                            session_id=session_id,
+                        )
+                    except Exception:  # noqa: BLE001
+                        _logger.warning(
+                            "Failed to persist compaction item for %s",
+                            session_id,
+                            exc_info=True,
+                        )
                 durable = next_durable
                 await _write_hook_state_async(bridge_dir, durable)
                 continue
@@ -3408,6 +3424,47 @@ async def _post_external_compaction_status(
         json={
             "type": "external_compaction_status",
             "data": {"status": status},
+        },
+    )
+    resp.raise_for_status()
+
+
+async def _persist_native_compaction_item(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+) -> None:
+    """
+    Persist a compaction boundary item to the conversation store.
+
+    Called when the forwarder observes a compaction-completed signal
+    (``SessionStart source=compact``). Queries the latest conversation
+    item to use as ``last_item_id`` so session resume knows the
+    compaction boundary — items before this marker are summarized
+    and don't need to be loaded.
+
+    :param client: Omnigent HTTP client.
+    :param session_id: Omnigent session/conversation id.
+    """
+    # Find the last persisted item to use as the compaction boundary.
+    resp = await client.get(
+        f"/v1/sessions/{session_id}/items",
+        params={"limit": 1, "order": "desc"},
+    )
+    resp.raise_for_status()
+    items = resp.json().get("data", [])
+    last_item_id = items[0]["id"] if items else f"compact_boundary_{session_id}"
+
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "compaction",
+            "data": {
+                "summary": ("[Claude Code compaction — context was compacted in the terminal]"),
+                "last_item_id": last_item_id,
+                "model": "unknown",
+                "token_count": 0,
+            },
         },
     )
     resp.raise_for_status()
