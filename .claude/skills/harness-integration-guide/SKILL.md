@@ -32,7 +32,7 @@ the vendor's tool-calling interface.
 | **Auth** | How credentials are obtained — API key, gateway token, vendor CLI login, OAuth, etc. |
 | **Streaming** | Harness forwards token-level or delta-level streaming to the Omnigent forwarder |
 | **Omnigent policies** | Harness enforces Omnigent-side tool policies — must support ALLOW, ASK, and DENY verdicts for both tool calls and tool results |
-| **Native elicitation (web)** | Harness surfaces tool-approval requests to the web UI — `canUseTool ASK`, `request_permission`, 2-stage cards |
+| **Native elicitation** | When a policy verdict is ASK, the harness surfaces the approval request in the Omnigent web UI so the user can approve or deny |
 | **Interrupt** | User can cancel a running turn mid-stream |
 | **Live queue (concurrent)** | Multiple turns can be queued and processed concurrently |
 | **Tool-boundary steer** | Omnigent can inject steering text at tool-call boundaries |
@@ -64,13 +64,12 @@ checkpoints:
 | **Tool call** (before execution) | Proceed silently | Surface approval request to user (via elicitation) | Block the call and return a policy-denied error to the model |
 | **Tool result** (after execution) | Return result to model | Surface result for user review before returning | Suppress the result and return a policy-denied error to the model |
 
-### Native elicitation strategies
+### Native elicitation
 
-| Strategy | How it works |
-|---|---|
-| `canUseTool ASK` | Omnigent asks the model whether a tool call should proceed; model responds with ASK to surface approval to the web UI |
-| `request_permission` | ACP-native permission request flow surfaced to the web UI |
-| 2-stage + card | Two-phase approval with a UI card |
+When a policy verdict is ASK, the harness must surface the pending tool call
+or tool result in the Omnigent web UI as an approval card, then relay the
+user's approve/deny decision back to the harness to continue or block
+execution.
 
 ### Resume / fork strategies
 
@@ -131,7 +130,7 @@ and relay the vendor's conversation into the Omnigent session.
 | **Auth** | Vendor login / config / token |
 | **Streaming (forwarder)** | `deltas` (token-level) vs `complete-only` (full response after completion) |
 | **Omnigent policies** | Whether the native harness enforces Omnigent-side tool policies — must support ALLOW, ASK, and DENY verdicts for both tool calls and tool results |
-| **Native elicitation (web)** | Whether the native harness surfaces tool-approval requests to the web UI — mirror+reply, permission.v2+reply |
+| **Native elicitation** | When a policy verdict is ASK, the native harness surfaces the approval request in the Omnigent web UI so the user can approve or deny |
 | **Interrupt** | User can abort a running turn |
 | **Bidirectional sync (TUI->Omni)** | TUI output mirrors into the Omnigent conversation |
 | **In-harness session-cmd sync** | Supports `clear`, `fork`, `resume`, `switch` commands from Omnigent |
