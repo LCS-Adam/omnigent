@@ -74,7 +74,7 @@ from omnigent.runner.resource_registry import (
     TerminalLifecycle,
 )
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
-from omnigent.spec.parser import discover_host_skills
+from omnigent.spec.skill_sources import SkillSourceContext, resolve_harness_skills
 from omnigent.spec.types import AgentSpec, LocalToolInfo, SkillSpec
 from omnigent.terminals.ws_bridge import (
     WS_CLOSE_TERMINAL_NOT_FOUND,
@@ -506,21 +506,27 @@ class _PiNativeLaunchConfig:
     :param terminal_launch_args: User pass-through native CLI args.
     :param external_session_id: Existing external session id, when captured by
         the extension.
+    :param fork_source_external_id: SOURCE Pi session id stamped on a forked
+        clone (``omnigent.fork.source_external_session_id``); consulted only
+        when the clone has no native session of its own yet.
+    :param fork_carry_history: ``True`` on a forked clone bound to a native
+        target (``omnigent.fork.carry_history``); when no source session
+        exists to clone, the clone's session is rebuilt from its OWN copied
+        Omnigent items (see :func:`_auto_create_pi_terminal`). Also consumed by
+        the cursor-native launch to replay prior turns as a text preamble on
+        the first message.
     :param model_override: Persisted per-session ``/model`` override, e.g.
         ``"claude-4.6-sonnet-medium"``; ``None`` when unset. Consumed by the
         cursor-native launch (``--model``), ignored by pi-native.
-    :param fork_carry_history: ``True`` when the session is a fork bound to a
-        carry-history native target (``omnigent.fork.carry_history``). Consumed
-        by the cursor-native launch to replay prior turns as a text preamble on
-        the first message; ignored by pi-native.
     """
 
     workspace: Path
     server_url: str
     terminal_launch_args: list[str] | None
     external_session_id: str | None
-    model_override: str | None = None
+    fork_source_external_id: str | None = None
     fork_carry_history: bool = False
+    model_override: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -708,6 +714,23 @@ async def _pi_native_launch_config(
         not isinstance(session_workspace, str) or not session_workspace
     ):
         raise RuntimeError(f"Invalid workspace for Pi session {session_id!r}.")
+    # Fork directives stamped on a clone at fork time. Only consulted when the
+    # clone has no external_session_id of its own yet (see the fork branches in
+    # _auto_create_pi_terminal); inert otherwise. Mirrors the codex-native and
+    # claude-native launch-config fork handling.
+    from omnigent.stores.conversation_store import (
+        FORK_CARRY_HISTORY_LABEL_KEY,
+        FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
+    )
+
+    fork_source_external_id: str | None = None
+    fork_carry_history = False
+    labels = snapshot.get("labels")
+    if isinstance(labels, dict):
+        _fse = labels.get(FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY)
+        if isinstance(_fse, str) and _fse:
+            fork_source_external_id = _fse
+        fork_carry_history = labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1"
     model_override = snapshot.get("model_override")
     if model_override is not None:
         if not isinstance(model_override, str) or not model_override:
@@ -718,19 +741,14 @@ async def _pi_native_launch_config(
             raise RuntimeError(
                 f"Invalid model_override for session {session_id!r}: {exc}"
             ) from exc
-    from omnigent.stores.conversation_store import FORK_CARRY_HISTORY_LABEL_KEY
-
-    labels = snapshot.get("labels")
-    fork_carry_history = (
-        isinstance(labels, dict) and labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1"
-    )
     return _PiNativeLaunchConfig(
         workspace=_pi_session_workspace(session_workspace),
         server_url=os.environ.get("RUNNER_SERVER_URL", "http://localhost:6767").rstrip("/"),
         terminal_launch_args=terminal_launch_args,
         external_session_id=external_session_id,
-        model_override=model_override,
+        fork_source_external_id=fork_source_external_id,
         fork_carry_history=fork_carry_history,
+        model_override=model_override,
     )
 
 
@@ -1377,6 +1395,135 @@ def _build_pi_native_args(
     return args
 
 
+async def _resolve_pi_resume_session(
+    *,
+    session_id: str,
+    launch_config: _PiNativeLaunchConfig,
+    session_dir: Path,
+    workspace: Path,
+    server_client: httpx.AsyncClient | None,
+) -> str | None:
+    """
+    Ensure Pi has a local session JSONL and return the id to launch with.
+
+    Three cases, mirroring claude-native / codex-native fork+resume:
+
+    1. **Cold resume** — the session already carries a captured Pi
+       ``external_session_id`` but the local session file may be missing
+       (cross-machine, a fresh runner, or a cleared bridge dir). Synthesize the
+       file from committed Omnigent items so ``pi --session <id>`` opens with
+       prior context. An existing file is reused untouched.
+    2. **Fork rebuild** — a forked clone bound to a pi-native target with NO
+       captured session of its own and a carry-history marker: mint a new Pi
+       session id, build its file from the clone's OWN copied Omnigent items,
+       and patch the server so Omnigent reflects the clone's session id and a
+       later relaunch resumes it via case 1.
+    3. **Fresh / nothing to carry** — return ``None`` so Pi launches a brand
+       new session.
+
+    Best-effort: on any failure we return the (possibly ``None``) captured id
+    so Pi launches fresh rather than pointing ``--session`` at a file that does
+    not exist.
+
+    :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
+    :param launch_config: Resolved Pi launch config (carries the captured id
+        and fork directives).
+    :param session_dir: Directory passed to ``pi --session-dir``.
+    :param workspace: Resolved cwd Pi will run in.
+    :param server_client: Runner Omnigent server client.
+    :returns: Pi session id to launch with via ``--session``, or ``None`` to
+        launch fresh.
+    """
+    if server_client is None:
+        return launch_config.external_session_id
+
+    from omnigent.pi_native_resume import ensure_local_pi_resume_session, mint_pi_session_id
+
+    # Resolve the provider's model only for the synthesized assistant records'
+    # informational ``model`` field; Pi's resume uses the live provider, so a
+    # missing model is harmless.
+    model = ""
+    try:
+        from omnigent.pi_native_credentials import resolve_pi_native_provider
+
+        provider = resolve_pi_native_provider()
+        if provider is not None and getattr(provider, "model", None):
+            model = provider.model
+    except Exception:  # noqa: BLE001 — informational only; never block launch
+        model = ""
+
+    # Case 1: cold resume of a session that already has a captured Pi id.
+    if launch_config.external_session_id is not None:
+        try:
+            await ensure_local_pi_resume_session(
+                server_client,
+                session_id=session_id,
+                external_session_id=launch_config.external_session_id,
+                session_dir=session_dir,
+                workspace=workspace,
+                model=model,
+            )
+        except Exception:  # noqa: BLE001 — best-effort; launch fresh on failure
+            _logger.warning(
+                "Could not synthesize Pi resume session for %s; launching without history",
+                session_id,
+                exc_info=True,
+            )
+        return launch_config.external_session_id
+
+    # Case 2: forked clone bound to a pi-native target with no captured session
+    # yet. Build the clone's session from its OWN copied Omnigent items under a
+    # minted id. (A same-provider source's captured id, when present, is stamped
+    # as fork_source_external_id; but Pi session files are runner-local and the
+    # clone has its OWN copied items, so we rebuild from items either way —
+    # there is no cross-session "resume the source's file" like codex's clone.)
+    if launch_config.fork_carry_history:
+        minted = mint_pi_session_id()
+        try:
+            built = await ensure_local_pi_resume_session(
+                server_client,
+                session_id=session_id,
+                external_session_id=minted,
+                session_dir=session_dir,
+                workspace=workspace,
+                model=model,
+            )
+        except Exception:  # noqa: BLE001 — best-effort; launch fresh on failure
+            built = None
+            _logger.warning(
+                "Could not build Pi session from items for forked clone %s; launching fresh",
+                session_id,
+                exc_info=True,
+            )
+        _logger.info(
+            "Pi terminal fork-rebuild decision: session=%s minted=%s built=%s",
+            session_id,
+            minted,
+            str(built) if built is not None else None,
+        )
+        if built is not None:
+            # Record the minted id so Omnigent reflects the clone's own Pi
+            # session and a later relaunch resumes it via case 1. Best-effort:
+            # the extension also re-captures the id on session_start, so a
+            # failed patch is recovered then.
+            try:
+                await server_client.patch(
+                    f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
+                    json={"external_session_id": minted},
+                    timeout=10.0,
+                )
+            except httpx.HTTPError:
+                _logger.warning(
+                    "Could not pre-set external_session_id for forked Pi clone %s; "
+                    "relying on extension capture",
+                    session_id,
+                    exc_info=True,
+                )
+            return minted
+
+    return None
+
+
 async def _auto_create_pi_terminal(
     session_id: str,
     resource_registry: SessionResourceRegistry,
@@ -1433,11 +1580,22 @@ async def _auto_create_pi_terminal(
         auth_headers=auth_headers,
     )
     pi_command = resolve_pi_executable()
+    # Rebuild the local Pi session JSONL from committed Omnigent items so a
+    # cold-resume or fork opens with prior conversation context (parity with
+    # claude-native / codex-native). Returns the id to launch with via
+    # ``--session`` (the captured id, a minted fork id, or None for fresh).
+    resume_session_id = await _resolve_pi_resume_session(
+        session_id=session_id,
+        launch_config=launch_config,
+        session_dir=session_dir,
+        workspace=launch_config.workspace,
+        server_client=server_client,
+    )
     pi_args = _build_pi_native_args(
         terminal_launch_args=launch_config.terminal_launch_args,
         extension_path=pi_extension,
         session_dir=session_dir,
-        external_session_id=launch_config.external_session_id,
+        external_session_id=resume_session_id,
     )
     pi_env = {
         PI_NATIVE_CONFIG_ENV_VAR: str(config),
@@ -1456,7 +1614,13 @@ async def _auto_create_pi_terminal(
             resolve_pi_native_provider,
         )
 
-        provider = resolve_pi_native_provider()
+        # Thread the agent spec's pinned model (``executor.model``) into the
+        # resolved provider so the generated ``models.json`` — and the
+        # appended ``--model`` arg (see ``pi_native_provider_launch``) — select
+        # it, reaching parity with claude-native / cursor-native. ``None``
+        # (no model declared) keeps the provider's default model.
+        spec_model = _pi_native_model_from_spec(agent_spec)
+        provider = resolve_pi_native_provider(model=spec_model)
         if provider is not None:
             cred_env, cred_args = pi_native_provider_launch(bridge_dir / "pi-agent", provider)
             pi_env.update(cred_env)
@@ -4036,6 +4200,32 @@ def _cursor_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) 
         )
         return None
     return model
+
+
+def _pi_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) -> str | None:
+    """
+    Read the Pi model id to launch the native TUI with, from a spec.
+
+    Reads the canonical ``spec.executor.model`` field (the same field the
+    in-process harnesses and cursor-native consume). Unlike cursor-native,
+    a gateway-routed id (``databricks-*``) IS usable here: the runner-owned
+    Pi process routes through the Databricks AI Gateway, whose ``models.json``
+    selects the model by its gateway id (see
+    :func:`omnigent.pi_native_credentials.resolve_pi_native_provider`). The
+    resolved model is threaded into ``resolve_pi_native_provider(model=...)``
+    so the generated ``models.json`` (and the appended ``--model``) selects
+    it.
+
+    :param agent_spec: Agent spec object, or a resolved wrapper carrying a
+        ``spec`` attribute. ``None`` means no spec was available.
+    :returns: A model id, e.g. ``"databricks-claude-opus-4-7"``, or ``None``
+        when the spec declares no model (Pi then uses the provider default).
+    """
+    spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
+    if spec is None:
+        return None
+    model = spec.executor.model
+    return model if isinstance(model, str) and model else None
 
 
 def _cursor_native_resume_args(chat_id: str | None, existing_args: list[str]) -> list[str]:
@@ -6865,6 +7055,14 @@ def get_session_agent_id(session_id: str) -> str | None:
     return _session_agent_ids_ref.get(session_id)
 
 
+# How long a session's discovered skills stay cached before the runner
+# re-walks the filesystem. Short enough that a skill or plugin installed
+# mid-session surfaces in the composer menu without a session restart, long
+# enough to collapse the bursty menu-open + per-invocation resolve calls onto
+# a single walk. Module-level so it can be tuned/patched in one place.
+_SESSION_SKILLS_CACHE_TTL_SECONDS = 60.0
+
+
 def create_runner_app(
     *,
     process_manager: HarnessProcessManager | None = None,
@@ -6973,10 +7171,12 @@ def create_runner_app(
     _session_snapshot_cache: dict[str, _SessionSnapshot] = {}  # session_id → snapshot
     _session_snapshot_locks: dict[str, asyncio.Lock] = {}  # session_id → snapshot fetch lock
     _session_spec_locks: dict[str, asyncio.Lock] = {}  # session_id → spec resolution lock
-    # session_id → merged (bundled + host) skills, discovered against
-    # this runner's filesystem. Skills are runner-owned: the walk runs
-    # once per session lifetime and is dropped in ``delete_session``.
-    _session_skills_cache: dict[str, list[SkillSpec]] = {}
+    # session_id → (monotonic expiry, merged bundled + host skills),
+    # discovered against this runner's filesystem. Skills are runner-owned:
+    # the walk reruns at most once per ``_SESSION_SKILLS_CACHE_TTL_SECONDS``
+    # (so a mid-session skill/plugin install surfaces) and the entry is
+    # dropped in ``delete_session``.
+    _session_skills_cache: dict[str, tuple[float, list[SkillSpec]]] = {}
     _session_workspace_cache: dict[str, str | None] = {}  # session_id → workspace path
     _session_agent_ids = _session_agent_ids_ref  # shared with module-level get_session_agent_id
     # Sub-agent name per session. Set from POST /v1/sessions body
@@ -15801,8 +16001,11 @@ def create_runner_app(
         contributes nothing). Falls back to the runner's global workspace,
         then the process cwd, when no workspace is known. Deduplicated by
         name with bundled winning, then earlier roots winning. Cached per
-        session so the filesystem walk runs once per session lifetime
-        (dropped in ``delete_session``).
+        session with a short TTL (``_SESSION_SKILLS_CACHE_TTL_SECONDS``) so the
+        walk reruns at most once per window — fresh enough to surface a
+        skill/plugin installed mid-session, while still collapsing the bursty
+        menu-open + per-invocation resolve calls (dropped in
+        ``delete_session``).
 
         :param session_id: Session/conversation identifier,
             e.g. ``"conv_abc123"``.
@@ -15814,7 +16017,11 @@ def create_runner_app(
         """
         cached = _session_skills_cache.get(session_id)
         if cached is not None:
-            return cached
+            expires_at, cached_skills = cached
+            if time.monotonic() < expires_at:
+                return cached_skills
+            # TTL elapsed — fall through to re-walk so a skill or plugin
+            # installed mid-session surfaces without a session restart.
         entry = await _resolve_session_spec_entry(session_id)
         spec = _unwrap_resolved_spec(entry) if entry is not None else None
         if spec is None:
@@ -15843,18 +16050,44 @@ def create_runner_app(
             roots.append(Path.cwd())
 
         def _discover() -> list[SkillSpec]:
-            """Merge bundled + host skills (every root) off the event loop."""
-            merged: list[SkillSpec] = list(spec.skills)
-            seen = {s.name for s in merged}
-            for root in roots:
-                for hs in discover_host_skills(root, spec.skills_filter):
-                    if hs.name not in seen:
-                        seen.add(hs.name)
-                        merged.append(hs)
+            """Merge bundled skills with the harness's extra skills off the loop."""
+            # Drop user-invocable:false skills from the bundle too, so the
+            # composer menu never lists a non-invocable skill regardless of
+            # source (harness skills are already filtered in resolve_harness_skills).
+            merged: list[SkillSpec] = [s for s in spec.skills if s.user_invocable]
+            # Seed the dedup set from EVERY bundled name — including the
+            # non-invocable ones dropped above — so marking a bundled skill
+            # non-invocable can't un-shadow a same-named host/harness skill
+            # the author never meant to surface.
+            seen = {s.name for s in spec.skills}
+            # Also dedup by on-disk skill dir: a harness provider (e.g. codex)
+            # may rediscover a bundle skill under a *different* name than its
+            # frontmatter ``name`` (it keys by directory), which would otherwise
+            # double-list the same skill. Same dir == same skill, drop it.
+            seen_dirs = {s.skill_dir.resolve() for s in spec.skills if s.skill_dir is not None}
+            ctx = SkillSourceContext(
+                roots=tuple(roots),
+                home=Path.home(),
+                skills_filter=spec.skills_filter,
+                bundle_dir=_resolved_spec_workdir(entry),
+            )
+            harness = canonicalize_harness(spec.executor.harness_kind)
+            for hs in resolve_harness_skills(ctx, harness):
+                if hs.name in seen:
+                    continue
+                if hs.skill_dir is not None and hs.skill_dir.resolve() in seen_dirs:
+                    continue
+                seen.add(hs.name)
+                if hs.skill_dir is not None:
+                    seen_dirs.add(hs.skill_dir.resolve())
+                merged.append(hs)
             return merged
 
         skills = await asyncio.to_thread(_discover)
-        _session_skills_cache[session_id] = skills
+        _session_skills_cache[session_id] = (
+            time.monotonic() + _SESSION_SKILLS_CACHE_TTL_SECONDS,
+            skills,
+        )
         return skills
 
     @app.get("/v1/sessions/{session_id}/skills")
