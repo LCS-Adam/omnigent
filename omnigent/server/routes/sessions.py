@@ -19391,7 +19391,7 @@ def create_sessions_router(
                 code=ErrorCode.NOT_FOUND,
             )
 
-        # Shared/template agents are read-only here (GHSA-jrrm-9hc7-2v3h);
+        # Shared/template agents are read-only here;
         # mirrors the guard in session_mcp_servers._editable_agent.
         if agent.session_id is None:
             raise OmnigentError(
