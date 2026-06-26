@@ -19,6 +19,18 @@
 //
 // Only handles drawn from .github/reviewers are ever removed when reconciling,
 // so a manually-added reviewer outside that set is left untouched.
+//
+// Linked-issue sync: the PR's linked ("closes #N") issues are consulted so the
+// PR reviewer and the linked-issue assignee stay one and the same person.
+//   - If a linked issue is ALREADY assigned to a maintainer, that maintainer is
+//     adopted as the PR reviewer (overriding the load-balanced area pick) --
+//     "the person who owns the issue reviews the fix".
+//   - Whoever ends up the reviewer is then assigned onto any linked issue that
+//     has NO assignee yet, so an unowned issue inherits the PR's reviewer.
+// Only maintainers are adopted as reviewers (a non-maintainer assignee can't be
+// requested for review); the push-down direction assigns regardless. Existing
+// divergences on already-assigned issues are left untouched. Needs
+// issues:write (see auto-assign-reviewer.yml) to assign the linked issue.
 module.exports = async ({ github, context, core }) => {
   const fs = require("fs");
   const TARGET = 1;
@@ -99,6 +111,46 @@ module.exports = async ({ github, context, core }) => {
     return;
   }
 
+  // --- Linked ("closes #N") issues for this PR, via GraphQL (the REST PR
+  // payload doesn't carry them). Same-repo only. A failure here must not block
+  // reviewer assignment, so it degrades to "no linked issues".
+  let linkedIssues = []; // [{ number, assignees: [original-case logins] }]
+  try {
+    const data = await github.graphql(
+      `query($owner:String!, $repo:String!, $number:Int!) {
+        repository(owner:$owner, name:$repo) {
+          pullRequest(number:$number) {
+            closingIssuesReferences(first: 20) {
+              nodes {
+                number
+                repository { nameWithOwner }
+                assignees(first: 20) { nodes { login } }
+              }
+            }
+          }
+        }
+      }`,
+      { owner, repo, number: pr.number }
+    );
+    const nodes =
+      data?.repository?.pullRequest?.closingIssuesReferences?.nodes || [];
+    linkedIssues = nodes
+      .filter((n) => n && n.repository?.nameWithOwner === `${owner}/${repo}`)
+      .map((n) => ({
+        number: n.number,
+        assignees: (n.assignees?.nodes || []).map((a) => a.login),
+      }));
+  } catch (e) {
+    core.warning(`Could not read linked issues; proceeding without them: ${e.message}`);
+  }
+
+  // Maintainers already assigned to a linked issue -> adopt as the reviewer.
+  // (A non-maintainer assignee can't be requested for review, so it's ignored
+  // here; the push-down below still keeps unassigned issues in sync.)
+  const issueReviewers = [
+    ...new Set(linkedIssues.flatMap((li) => li.assignees)),
+  ].filter((u) => maint.has(u.toLowerCase()) && u.toLowerCase() !== author);
+
   // --- Global open-review load (stateless fairness signal).
   const openPRs = await github.paginate(github.rest.pulls.list, {
     owner,
@@ -130,13 +182,21 @@ module.exports = async ({ github, context, core }) => {
     return out;
   };
 
-  // Desired = 1 lowest-load from candidates; top up from the full pool if an
-  // area has fewer than 1 owner.
-  let desired = takeLowest(candidates, TARGET);
-  if (desired.length < TARGET) {
-    const have = new Set(desired.map((u) => u.toLowerCase()).concat(author));
-    const filler = [...poolSet.values()].filter((u) => !have.has(u.toLowerCase()));
-    desired = desired.concat(takeLowest(filler, TARGET - desired.length));
+  // Desired reviewer. A maintainer already assigned to a linked issue wins
+  // (load-balanced if several), so the issue owner reviews the fix. Otherwise
+  // fall back to 1 lowest-load area candidate, topped up from the full pool if
+  // the area has no eligible owner.
+  let desired;
+  if (issueReviewers.length) {
+    desired = takeLowest(issueReviewers, TARGET);
+    core.info(`Adopting linked-issue assignee(s) [${issueReviewers.join(", ")}] as reviewer.`);
+  } else {
+    desired = takeLowest(candidates, TARGET);
+    if (desired.length < TARGET) {
+      const have = new Set(desired.map((u) => u.toLowerCase()).concat(author));
+      const filler = [...poolSet.values()].filter((u) => !have.has(u.toLowerCase()));
+      desired = desired.concat(takeLowest(filler, TARGET - desired.length));
+    }
   }
   const desiredLc = new Set(desired.map((u) => u.toLowerCase()));
 
@@ -183,9 +243,31 @@ module.exports = async ({ github, context, core }) => {
     });
   }
 
+  // --- Push-down: mirror the chosen reviewer onto any linked issue that has no
+  // assignee yet, so an unowned issue inherits the PR's reviewer. Already-
+  // assigned issues are left as-is (existing divergence is tolerated). Per-issue
+  // try/catch so one un-assignable issue can't abort the rest.
+  const syncedIssues = [];
+  if (desired.length) {
+    for (const li of linkedIssues) {
+      if (li.assignees.length) continue;
+      try {
+        await github.rest.issues.addAssignees({
+          owner, repo, issue_number: li.number, assignees: desired,
+        });
+        syncedIssues.push(li.number);
+      } catch (e) {
+        core.warning(`Could not assign linked issue #${li.number}: ${e.message}`);
+      }
+    }
+  }
+
   core.info(
     `Reviewers -> [${desired.join(", ")}]` +
       ` (area pool ${areaOwners.size || "∅→full"}, +${toAdd.length}/-${toRemove.length})` +
-      ` | Assignees +${toAddAssignees.length}/-${toRemoveAssignees.length}.`
+      ` | Assignees +${toAddAssignees.length}/-${toRemoveAssignees.length}` +
+      ` | Linked issues: ${linkedIssues.length || "none"}` +
+      `${issueReviewers.length ? ` (adopted owner)` : ""}` +
+      `${syncedIssues.length ? `, synced #${syncedIssues.join(", #")}` : ""}.`
   );
 };
