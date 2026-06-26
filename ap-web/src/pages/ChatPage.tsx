@@ -3772,13 +3772,20 @@ export function Composer({
       const parts = trimmed.split(/\s+/);
       const cmd = parts[0].toLowerCase();
       const arg = parts[1] ?? "";
-      // Bare "/model" when the picker has a Models section (claude-native):
-      // sent as plaintext it would open Claude's interactive selector inside
-      // the vendor TUI, which the web UI can't render — the session just
-      // blocks. Open the composer's model picker instead and let the user
-      // choose there. "/model <name>" takes the builtin route below to
+      // Bare "/model" when the picker has a switchable Models section
+      // (claude-native): sent as plaintext it would open Claude's interactive
+      // selector inside the vendor TUI, which the web UI can't render — the
+      // session just blocks. Open the composer's model picker instead and let
+      // the user choose there. "/model <name>" takes the builtin route below to
       // setModel — the same write the picker makes.
-      if (cmd === "/model" && !arg && showModels) {
+      //
+      // opencode is excluded: it surfaces showModels (the pill mirrors its live
+      // TUI model) but ships no web model options, so intercepting bare "/model"
+      // would pop an empty dropdown and swallow the command. Fall through to the
+      // builtin "/model" handler below, which surfaces the current model as a
+      // read-only hint. ("/model <name>" still routes to setModel there —
+      // opencode reads model_override on the next web-injected turn.)
+      if (cmd === "/model" && !arg && showModels && modelPickerKind !== "opencode") {
         dirtyRef.current = true;
         setValue("");
         setCommandError(null);
