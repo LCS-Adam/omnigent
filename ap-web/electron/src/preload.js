@@ -80,6 +80,18 @@ contextBridge.exposeInMainWorld("omnigentDesktop", {
    */
   getServerStatus: () => ipcRenderer.invoke("omnigent:server-get-status"),
   /**
+   * Start / stop / restart this machine's host daemon for the window's server.
+   * Resolves a `{ ok, error? }` result.
+   * @param {"start" | "stop" | "restart"} action
+   */
+  controlHost: (action) => ipcRenderer.invoke("omnigent:host-control", action),
+  /**
+   * Start / stop / restart the local server (loopback servers only). Resolves a
+   * `{ ok, error? }` result.
+   * @param {"start" | "stop" | "restart"} action
+   */
+  controlServer: (action) => ipcRenderer.invoke("omnigent:server-control", action),
+  /**
    * Subscribe to pushed host-status updates (emitted on a timer). The callback
    * receives the same shape as getHostStatus. Returns an unsubscribe function.
    * @param {(status: object) => void} callback

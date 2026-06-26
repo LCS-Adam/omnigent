@@ -1828,6 +1828,49 @@ function registerIpc() {
     return serverManager.serverStatusFor(resolvedCliPath(), serverUrl);
   });
 
+  // SPA → start / stop / restart this machine's host daemon for the window's
+  // own server (the sidebar host-status menu).
+  ipcMain.handle("omnigent:host-control", async (event, action) => {
+    if (!isPinnedOriginSender(event)) {
+      throw new Error("host-control is only available to a connected server page");
+    }
+    const serverUrl = senderServerUrl(event);
+    if (!serverUrl) return { ok: false, error: "this window is not connected to a server" };
+    const cliPath = resolvedCliPath();
+    if (!cliPath) {
+      return { ok: false, error: "The omnigent CLI was not found. Install it or set its path." };
+    }
+    let result;
+    if (action === "start") result = await serverManager.ensureHostConnected(cliPath, serverUrl);
+    else if (action === "stop") result = await serverManager.disconnectHost(cliPath, serverUrl);
+    else if (action === "restart") result = await serverManager.restartHost(cliPath, serverUrl);
+    else result = { ok: false, error: `unknown host action '${action}'` };
+    broadcastHostStatus();
+    return result;
+  });
+
+  // SPA → start / stop / restart the local server (loopback servers only).
+  ipcMain.handle("omnigent:server-control", async (event, action) => {
+    if (!isPinnedOriginSender(event)) {
+      throw new Error("server-control is only available to a connected server page");
+    }
+    const serverUrl = senderServerUrl(event);
+    if (!serverUrl || !omnigentCli.isLoopbackServer(serverUrl)) {
+      return { ok: false, error: "the local-server control applies to loopback servers only" };
+    }
+    const cliPath = resolvedCliPath();
+    if (!cliPath) {
+      return { ok: false, error: "The omnigent CLI was not found. Install it or set its path." };
+    }
+    let result;
+    if (action === "start") result = await serverManager.startLocalServer(cliPath);
+    else if (action === "stop") result = await serverManager.stopLocalServer(cliPath);
+    else if (action === "restart") result = await serverManager.restartLocalServer(cliPath);
+    else result = { ok: false, error: `unknown server action '${action}'` };
+    broadcastHostStatus();
+    return result;
+  });
+
   startHostStatusPoller();
 }
 

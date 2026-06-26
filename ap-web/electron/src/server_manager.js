@@ -160,28 +160,54 @@ async function disconnectHost(cliPath, serverUrl) {
   const key = cli.normalizeServerUrl(serverUrl);
   const entry = hostChildren.get(key);
   if (entry) {
-    killChild(entry.child);
     hostChildren.delete(key);
+    // Await the exit so a follow-up restart spawns fresh rather than adopting
+    // the daemon we're tearing down.
+    await stopChild(entry.child);
     return { ok: true };
   }
+  // No desktop-owned child: ask the CLI to stop a daemon we'd adopted.
   const res = await cli.stopHost(cliPath, serverUrl);
   return { ok: res.ok, error: res.ok ? undefined : res.output };
 }
 
 /**
- * SIGTERM a child, escalating to SIGKILL after a grace period.
+ * Restart this machine's host connection: stop (awaiting the daemon down), then
+ * reconnect.
+ *
+ * @param {string} cliPath
+ * @param {string} serverUrl
+ * @returns {Promise<{ ok: boolean, ownedByDesktop: boolean, error?: string }>}
+ */
+async function restartHost(cliPath, serverUrl) {
+  await disconnectHost(cliPath, serverUrl);
+  return ensureHostConnected(cliPath, serverUrl);
+}
+
+/**
+ * SIGTERM a child, escalating to SIGKILL after a grace period, and resolve once
+ * it has actually exited.
  *
  * @param {import("child_process").ChildProcess} child
+ * @returns {Promise<void>}
  */
-function killChild(child) {
-  if (!child || child.exitCode !== null) return;
-  child.kill("SIGTERM");
-  const t = setTimeout(() => {
-    if (child.exitCode === null) child.kill("SIGKILL");
-  }, KILL_GRACE_MS);
-  // Don't let the escalation timer keep the event loop alive at quit.
-  if (typeof t.unref === "function") t.unref();
-  child.once("exit", () => clearTimeout(t));
+function stopChild(child) {
+  return new Promise((resolve) => {
+    if (!child || child.exitCode !== null) {
+      resolve();
+      return;
+    }
+    const t = setTimeout(() => {
+      if (child.exitCode === null) child.kill("SIGKILL");
+    }, KILL_GRACE_MS);
+    // Don't let the escalation timer keep the event loop alive at quit.
+    if (typeof t.unref === "function") t.unref();
+    child.once("exit", () => {
+      clearTimeout(t);
+      resolve();
+    });
+    child.kill("SIGTERM");
+  });
 }
 
 /**
@@ -206,7 +232,8 @@ async function startLocalServer(cliPath) {
 }
 
 /**
- * Stop the local server only if this app started it.
+ * Stop the local server only if this app started it (used at quit). A server
+ * the desktop didn't start is left running.
  *
  * @param {string} cliPath
  * @returns {Promise<{ ok: boolean, skipped?: boolean }>}
@@ -216,6 +243,30 @@ async function stopOwnedLocalServer(cliPath) {
   const res = await cli.stopLocalServer(cliPath);
   ownedLocalServer = null;
   return { ok: res.ok };
+}
+
+/**
+ * Stop the local server unconditionally — the user explicitly asked for it from
+ * the sidebar control, so honor it even if the desktop didn't start it.
+ *
+ * @param {string} cliPath
+ * @returns {Promise<{ ok: boolean, error?: string }>}
+ */
+async function stopLocalServer(cliPath) {
+  const res = await cli.stopLocalServer(cliPath);
+  ownedLocalServer = null;
+  return { ok: res.ok, error: res.ok ? undefined : res.output };
+}
+
+/**
+ * Restart the local server: stop (the CLI waits for it to exit), then start.
+ *
+ * @param {string} cliPath
+ * @returns {Promise<{ ok: boolean, url?: string, error?: string }>}
+ */
+async function restartLocalServer(cliPath) {
+  await stopLocalServer(cliPath);
+  return startLocalServer(cliPath);
 }
 
 /**
@@ -277,15 +328,7 @@ async function serverStatusFor(cliPath, serverUrl) {
 async function shutdown(cliPath) {
   const exits = [];
   for (const [, entry] of hostChildren) {
-    if (entry.child.exitCode !== null) continue;
-    exits.push(
-      new Promise((resolve) => {
-        entry.child.once("exit", resolve);
-        const t = setTimeout(resolve, KILL_GRACE_MS + 500);
-        if (typeof t.unref === "function") t.unref();
-      }),
-    );
-    killChild(entry.child);
+    exits.push(stopChild(entry.child));
   }
   await Promise.all(exits);
   hostChildren.clear();
@@ -295,8 +338,11 @@ async function shutdown(cliPath) {
 module.exports = {
   ensureHostConnected,
   disconnectHost,
+  restartHost,
   startLocalServer,
   stopOwnedLocalServer,
+  stopLocalServer,
+  restartLocalServer,
   statusFor,
   serverStatusFor,
   shutdown,

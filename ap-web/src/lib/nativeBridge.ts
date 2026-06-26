@@ -128,9 +128,16 @@ interface ElectronDesktopApi extends NativeShellApi {
   getHostStatus?: () => Promise<HostStatus | null>;
   /** Local-server status for the window's server (loopback only), or null. */
   getServerStatus?: () => Promise<LocalServerStatus | null>;
+  /** Start / stop / restart this machine's host daemon for the window's server. */
+  controlHost?: (action: HostControlAction) => Promise<HostActionResult>;
+  /** Start / stop / restart the local server (loopback only). */
+  controlServer?: (action: HostControlAction) => Promise<HostActionResult>;
   /** Subscribe to pushed host-status updates; returns an unsubscribe. */
   onHostStatusChanged?: (callback: (status: HostStatus) => void) => () => void;
 }
+
+/** A lifecycle action for the host daemon or the local server. */
+export type HostControlAction = "start" | "stop" | "restart";
 
 /** This machine's host-connection status for a server, from the desktop shell. */
 export interface HostStatus {
@@ -158,6 +165,12 @@ export interface LocalServerStatus {
   liveSessions: number;
   /** Whether this desktop app started (and would stop) the local server. */
   ownedByDesktop: boolean;
+}
+
+/** Result of a host/server control action from the desktop shell. */
+export interface HostActionResult {
+  ok: boolean;
+  error?: string;
 }
 
 /** Data backing the title-bar server picker, from the Electron shell. */
@@ -486,6 +499,38 @@ export async function getLocalServerStatus(): Promise<LocalServerStatus | null> 
   } catch (err) {
     console.warn("[nativeBridge] electron getServerStatus failed:", err);
     return null;
+  }
+}
+
+/**
+ * Start / stop / restart this machine's host daemon for the window's server,
+ * via the desktop shell. Resolves `{ ok, error? }`; a no-op `{ ok: false }`
+ * outside the shell.
+ */
+export async function controlHost(action: HostControlAction): Promise<HostActionResult> {
+  const electron = electronApi();
+  if (!electron?.controlHost) return { ok: false, error: "not running under the desktop shell" };
+  try {
+    return await electron.controlHost(action);
+  } catch (err) {
+    console.warn("[nativeBridge] electron controlHost failed:", err);
+    return { ok: false, error: String(err) };
+  }
+}
+
+/**
+ * Start / stop / restart the local server (loopback servers only), via the
+ * desktop shell. Resolves `{ ok, error? }`; a no-op `{ ok: false }` outside the
+ * shell.
+ */
+export async function controlServer(action: HostControlAction): Promise<HostActionResult> {
+  const electron = electronApi();
+  if (!electron?.controlServer) return { ok: false, error: "not running under the desktop shell" };
+  try {
+    return await electron.controlServer(action);
+  } catch (err) {
+    console.warn("[nativeBridge] electron controlServer failed:", err);
+    return { ok: false, error: String(err) };
   }
 }
 

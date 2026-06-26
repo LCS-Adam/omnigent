@@ -327,18 +327,25 @@ once the server actually responds — either adopts a daemon already serving tha
 server (one you started by hand) or spawns `omnigent host --server <url>`. The
 toggle is disabled until the CLI resolves.
 
-### Host status in the sidebar
+### Host / server controls in the sidebar
 
-Inside the connected app, a **read-only** host indicator sits in the sidebar
-next to Settings: a colored dot (green = connected, amber = connecting, muted =
-off / CLI missing) plus a short label and a tooltip with session and
-local-server detail. It reads live from `omnigent host status --json` (connected
-= a live daemon process **and** an online host tunnel; the shell never caches
-it) via the JS bridge — `window.omnigentDesktop` → `getHostStatus` /
-`getServerStatus` / `onHostStatusChanged`, typed in
-[`../src/lib/nativeBridge.ts`](../src/lib/nativeBridge.ts), gated to the window's
-**pinned origin** like the badge/notification bridge. The indicator is
-desktop-shell only and currently shown on the desktop (non-mobile) sidebar.
+Inside the connected app, the sidebar footer (next to Settings) shows a **Host
+Status** row — a label and a colored dot (green = connected, amber =
+connecting, muted = off / CLI missing) — that opens a **Start / Stop / Restart**
+menu for this machine's host daemon. When the server is a **local** one, a
+parallel **Local Server Status** row with the same Start / Stop / Restart menu
+appears for the local server itself. Menu items enable by current state (you
+can't Start something already running, or Stop something that's off).
+
+Status is read live from `omnigent host status --json` / `omnigent server status
+--json` (host connected = a live daemon process **and** an online host tunnel;
+the shell never caches it). The whole surface goes through the JS bridge —
+`window.omnigentDesktop` → `getHostStatus` / `getServerStatus` /
+`onHostStatusChanged` (read + live) and `controlHost` / `controlServer`
+(start/stop/restart), typed in
+[`../src/lib/nativeBridge.ts`](../src/lib/nativeBridge.ts) and gated to the
+window's **pinned origin** like the badge/notification bridge. The rows are
+desktop-shell only and shown on the desktop (non-mobile) sidebar.
 
 ### Lifecycle
 
