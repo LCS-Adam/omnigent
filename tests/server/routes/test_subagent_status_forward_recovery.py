@@ -12,6 +12,7 @@ from __future__ import annotations
 import types
 from typing import Any
 
+import httpx
 import pytest
 
 from omnigent.server.routes import sessions as sessions_mod
@@ -248,3 +249,78 @@ async def test_recover_falls_back_to_root_when_no_direct_parent(
     assert result is not None and result.status_code == 202
     assert store.rebinds == [("conv_child", "runner_new")]
     assert _patch_forward_and_wait["waited_for"] == ["conv_root"]
+
+
+async def test_recover_real_body_retry_resolves_healed_runner() -> None:
+    """
+    End-to-end recovery body: the healed ``runner_id`` is what the retry resolves.
+
+    Drives the REAL recovery path with NO stub of
+    ``_forward_session_change_to_runner``. A fake router mirrors
+    ``RunnerRouter``'s contract — it re-reads the conversation's current
+    ``runner_id`` fresh on every resolve and only hands back a client for the
+    live runner. This asserts the load-bearing invariant flagged in review:
+    after ``replace_runner_id`` heals the child onto the parent's live runner,
+    the retry's resolver picks the NEW runner and the forward lands (202) — i.e.
+    healing the persisted binding genuinely repoints the retry, rather than
+    resolving a stale in-memory id.
+    """
+    convs: dict[str, Any] = {
+        "conv_parent": _conv("conv_parent", runner_id="R_live"),
+        "conv_child": _conv("conv_child", runner_id="R_old", parent_id="conv_parent"),
+    }
+    rebinds: list[tuple[str, str]] = []
+
+    class _Store:
+        def get_conversation(self, conversation_id: str) -> Any | None:
+            return convs.get(conversation_id)
+
+        def replace_runner_id(self, conversation_id: str, runner_id: str) -> Any:
+            rebinds.append((conversation_id, runner_id))
+            prev = convs[conversation_id]
+            convs[conversation_id] = _conv(
+                conversation_id,
+                runner_id=runner_id,
+                parent_id=prev.parent_conversation_id,
+                root_id=prev.root_conversation_id,
+            )
+            return convs[conversation_id]
+
+    posted: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        posted.append(request.url.path)
+        return httpx.Response(202)
+
+    live_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler), base_url="http://runner"
+    )
+
+    class _Router:
+        """Re-reads the conv's CURRENT runner_id; resolves only the live one."""
+
+        def client_for_session_resources(self, conversation_id: str) -> Any:
+            runner_id = convs[conversation_id].runner_id
+            if runner_id != "R_live":
+                raise LookupError(f"runner {runner_id} offline")
+            return types.SimpleNamespace(client=live_client)
+
+    try:
+        # tunnel_registry=None → skip the liveness wait and exercise the real
+        # rebind + forward + resolver path.
+        result = await _recover_subagent_status_forward_via_parent(
+            convs["conv_child"],
+            runner_router=_Router(),  # type: ignore[arg-type]
+            tunnel_registry=None,
+            conversation_store=_Store(),  # type: ignore[arg-type]
+            forward_body={"type": "external_session_status", "data": {"status": "idle"}},
+        )
+    finally:
+        await live_client.aclose()
+
+    assert result is not None and result.status_code == 202
+    # Child healed to the parent's live runner...
+    assert rebinds == [("conv_child", "R_live")]
+    # ...and the retry forwarded via the CHILD id, which the resolver — reading
+    # the freshly healed runner_id — routed to the live runner.
+    assert posted == ["/v1/sessions/conv_child/events"]
