@@ -579,12 +579,24 @@ async def _drive_model_effort(base_url: str, session_id: str) -> None:
                 "aria-checked", "true"
             )
 
-            # Model + effort are two radio groups in the same submenu; a pick
-            # keeps the submenu open (no close-on-select), so both are set in one
-            # visit. Each radio reflects its pick via aria-checked.
+            # Pick model and effort in SEPARATE submenu visits. Picking a knob
+            # keeps the menu open, but the pick re-renders the submenu, which
+            # briefly detaches the OTHER group's rows — clicking a second knob in
+            # the same visit races that re-render and flakes (the effort row stays
+            # perpetually "detached, retrying"). Closing and reopening between the
+            # two picks gives each click a stable submenu (the picks persist as
+            # screen state across reopen).
             opus = page.get_by_test_id("new-chat-landing-model-opus")
             await opus.click()
             await expect(opus).to_have_attribute("aria-checked", "true")
+            await page.keyboard.press("Escape")
+            await page.keyboard.press("Escape")
+
+            await _open_entry_config(page, "ag_claude_e2e")
+            # The model pick persisted across the reopen.
+            await expect(page.get_by_test_id("new-chat-landing-model-opus")).to_have_attribute(
+                "aria-checked", "true"
+            )
             high = page.get_by_test_id("new-chat-landing-effort-high")
             await high.click()
             await expect(high).to_have_attribute("aria-checked", "true")
