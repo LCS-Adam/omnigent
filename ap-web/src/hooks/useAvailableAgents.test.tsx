@@ -94,7 +94,9 @@ describe("useAvailableAgents", () => {
     routeFetch({
       [BUILTINS_URL]: mockResponse({
         object: "list",
-        data: [{ id: "ag_codex_fork", name: "codex-native-ui (fork ag_old)", harness: "codex-native" }],
+        data: [
+          { id: "ag_codex_fork", name: "codex-native-ui (fork ag_old)", harness: "codex-native" },
+        ],
         has_more: true,
         last_id: "ag_codex_fork",
       }),
@@ -421,7 +423,11 @@ describe("useAvailableAgents", () => {
           // resolve by harness but must not compete with the seeded rows.
           { id: "ag_stale_codex", name: "codex-native-ui (fork ag_old)", harness: "codex-native" },
           { id: "ag_codex", name: "codex-native-ui", harness: "codex-native" },
-          { id: "ag_stale_claude", name: "claude-native-ui (fork ag_old)", harness: "claude-native" },
+          {
+            id: "ag_stale_claude",
+            name: "claude-native-ui (fork ag_old)",
+            harness: "claude-native",
+          },
           { id: "ag_claude", name: "claude-native-ui", harness: "claude-native" },
           { id: "ag_stale_kiro", name: "kiro-naitive", harness: "kiro-native" },
           { id: "ag_kiro", name: "kiro-native-ui", harness: "kiro-native" },
