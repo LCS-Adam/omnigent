@@ -84,17 +84,43 @@ def should_capture_content() -> bool:
     return _capture_content
 
 
+def _fastapi_instrumentation_enabled() -> bool:
+    """
+    Decide whether to install FastAPI server instrumentation.
+
+    Default-on when a tracing backend is configured
+    (``OTEL_EXPORTER_OTLP_ENDPOINT`` is set) — that is the only situation
+    where HTTP server spans have somewhere to go, and it is where
+    end-to-end trace propagation across the server / runner / harness
+    ASGI apps matters.
+
+    The explicit ``OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION`` flag always
+    wins when set: ``true`` forces it on (e.g. with an in-memory
+    exporter in tests), any other value forces it off. Bare installs
+    with no backend stay uninstrumented, avoiding span overhead for
+    users who are not tracing.
+
+    :returns: ``True`` if FastAPI instrumentation should be installed.
+    """
+    explicit = os.environ.get("OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION")
+    if explicit is not None:
+        return explicit.strip().lower() in ("true", "1", "yes")
+    return bool(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip())
+
+
 def instrument_fastapi_app(app: FastAPI) -> None:
     """
-    Optionally install OpenTelemetry FastAPI instrumentation on an app.
+    Install OpenTelemetry FastAPI server instrumentation on an app.
 
-    FastAPI auto-instrumentation is opt-in because it adds HTTP server
-    spans and metrics that most deployments don't need. Set
-    ``OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION=true`` to enable.
+    Enabled by default whenever a tracing backend is configured (see
+    :func:`_fastapi_instrumentation_enabled`); set
+    ``OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION`` to force it on or off.
+    Installing it on the server, runner, and harness ASGI apps is what
+    continues an incoming ``traceparent`` across each HTTP boundary.
 
     :param app: FastAPI app instance to instrument.
     """
-    if not _env_bool("OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION"):
+    if not _fastapi_instrumentation_enabled():
         return
     try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -102,6 +128,55 @@ def instrument_fastapi_app(app: FastAPI) -> None:
         FastAPIInstrumentor.instrument_app(app)
     except Exception:
         _logger.exception("failed to initialize FastAPI OpenTelemetry instrumentation")
+
+
+def _instrument_httpx() -> None:
+    """
+    Install OpenTelemetry HTTPX client instrumentation process-wide.
+
+    Wraps every ``httpx`` client so outbound requests inject the W3C
+    ``traceparent`` header and emit a client span. This is what carries
+    the trace across the TUI/SDK client → server hop, the server →
+    runner reverse-tunnel (whose transport forwards request headers
+    verbatim), and the native-harness policy HTTP hook.
+
+    Idempotent: ``HTTPXClientInstrumentor`` no-ops if already
+    instrumented. Failures degrade quietly — tracing is best-effort and
+    must never break request handling.
+    """
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+        HTTPXClientInstrumentor().instrument()
+    except Exception:
+        _logger.exception("failed to initialize HTTPX OpenTelemetry instrumentation")
+
+
+def instrument_sqlalchemy_engine(engine: Any) -> None:
+    """
+    Install OpenTelemetry instrumentation on a single SQLAlchemy engine.
+
+    Every statement executed on ``engine`` becomes a child span under
+    the active trace, so a request's database work shows up inline in
+    the trace waterfall. Called once per engine at creation time (see
+    ``omnigent.db.utils.get_or_create_engine``).
+
+    ``opentelemetry-instrumentation-sqlalchemy`` is an optional
+    dependency; when it is absent (bare installs without the tracing
+    extras) this degrades to a no-op. Other failures are logged but not
+    raised — instrumentation must never block engine creation.
+
+    :param engine: The SQLAlchemy :class:`~sqlalchemy.engine.Engine` to
+        instrument.
+    """
+    try:
+        from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+
+        SQLAlchemyInstrumentor().instrument(engine=engine)
+    except ImportError:
+        _logger.debug("SQLAlchemy OpenTelemetry instrumentation not installed; skipping")
+    except Exception:
+        _logger.exception("failed to instrument SQLAlchemy engine")
 
 
 def parse_provider_name(model: str) -> tuple[str, str]:
@@ -600,6 +675,12 @@ def init() -> None:
     _init_otel_traces(endpoint)
     _init_otel_metrics()
     _init_otel_logs()
+    _instrument_httpx()
+
+    # NOTE: FastAPI server instrumentation is installed by the app
+    # factories (server / runner / harness) via ``instrument_fastapi_app``.
+    # It defaults on when a tracing backend is configured and can be
+    # forced on/off with ``OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION``.
 
     _initialized = True
     _logger.info(

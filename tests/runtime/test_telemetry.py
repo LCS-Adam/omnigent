@@ -478,22 +478,66 @@ def test_init_respects_capture_content_flag(
     assert telemetry.should_capture_content() is False
 
 
-def test_instrument_fastapi_app_is_opt_in(
+def _stub_fastapi_instrumentor(monkeypatch: pytest.MonkeyPatch) -> list[FastAPI]:
+    """
+    Replace ``FastAPIInstrumentor.instrument_app`` with a recorder.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :returns: A list that accumulates each app passed to the
+        instrumentor — empty means instrumentation was skipped.
+    """
+    calls: list[FastAPI] = []
+    monkeypatch.setattr(
+        "opentelemetry.instrumentation.fastapi.FastAPIInstrumentor.instrument_app",
+        lambda app: calls.append(app),
+    )
+    return calls
+
+
+def test_instrument_fastapi_app_disabled_without_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    FastAPI instrumentation stays disabled unless explicitly requested.
+    With no flag and no tracing backend configured, FastAPI
+    instrumentation is skipped — bare installs pay no span overhead.
     """
-    calls: list[FastAPI] = []
-
-    def fake_instrument_app(app: FastAPI) -> None:
-        calls.append(app)
-
     monkeypatch.delenv("OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION", raising=False)
-    monkeypatch.setattr(
-        "opentelemetry.instrumentation.fastapi.FastAPIInstrumentor.instrument_app",
-        fake_instrument_app,
-    )
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    calls = _stub_fastapi_instrumentor(monkeypatch)
+
+    telemetry.instrument_fastapi_app(FastAPI())
+
+    assert calls == []
+
+
+def test_instrument_fastapi_app_default_on_with_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    With the flag unset, instrumentation defaults ON when an OTLP
+    endpoint is configured — that is when HTTP server spans have
+    somewhere to go and when cross-app trace propagation matters.
+    """
+    monkeypatch.delenv("OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION", raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+    app = FastAPI()
+    calls = _stub_fastapi_instrumentor(monkeypatch)
+
+    telemetry.instrument_fastapi_app(app)
+
+    assert calls == [app]
+
+
+def test_instrument_fastapi_app_explicit_false_overrides_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    An explicit ``OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION=false`` wins
+    even when a backend is configured — operators can force it off.
+    """
+    monkeypatch.setenv("OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION", "false")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+    calls = _stub_fastapi_instrumentor(monkeypatch)
 
     telemetry.instrument_fastapi_app(FastAPI())
 
@@ -504,20 +548,130 @@ def test_instrument_fastapi_app_calls_instrumentor_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    The opt-in flag installs OpenTelemetry FastAPI instrumentation.
+    The explicit flag installs OpenTelemetry FastAPI instrumentation
+    even with no backend configured (the in-memory-exporter test path).
     """
-    app = FastAPI()
-    calls: list[FastAPI] = []
-
-    def fake_instrument_app(app_to_instrument: FastAPI) -> None:
-        calls.append(app_to_instrument)
-
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     monkeypatch.setenv("OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION", "true")
-    monkeypatch.setattr(
-        "opentelemetry.instrumentation.fastapi.FastAPIInstrumentor.instrument_app",
-        fake_instrument_app,
-    )
+    app = FastAPI()
+    calls = _stub_fastapi_instrumentor(monkeypatch)
 
     telemetry.instrument_fastapi_app(app)
 
     assert calls == [app]
+
+
+def test_instrument_httpx_wires_global_client() -> None:
+    """
+    ``_instrument_httpx`` installs the global HTTPX instrumentation so
+    outbound httpx requests inject ``traceparent``. Idempotent — a
+    second call must not raise. Uninstruments afterward to avoid
+    leaking global state into other tests.
+    """
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+    instrumentor = HTTPXClientInstrumentor()
+    was_instrumented = instrumentor.is_instrumented_by_opentelemetry
+    try:
+        telemetry._instrument_httpx()
+        assert instrumentor.is_instrumented_by_opentelemetry is True
+        # Idempotent: calling again is a no-op, not an error.
+        telemetry._instrument_httpx()
+        assert instrumentor.is_instrumented_by_opentelemetry is True
+    finally:
+        if not was_instrumented:
+            instrumentor.uninstrument()
+
+
+def test_instrument_sqlalchemy_engine_instruments() -> None:
+    """
+    ``instrument_sqlalchemy_engine`` instruments a real engine so its
+    statements emit spans. Engine-scoped instrumentation does not leak
+    globally, so no teardown is needed.
+    """
+    from sqlalchemy import create_engine
+
+    engine = create_engine("sqlite://")
+    # Must not raise; the call is the contract exercised at engine
+    # creation in ``db.utils.get_or_create_engine``.
+    telemetry.instrument_sqlalchemy_engine(engine)
+
+
+def test_instrument_sqlalchemy_engine_missing_package_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    When the optional SQLAlchemy instrumentation package is absent,
+    the helper degrades to a no-op rather than raising — bare installs
+    without the tracing extras must still create engines.
+    """
+    import sys
+
+    from sqlalchemy import create_engine
+
+    # Force the import inside the helper to fail with ImportError.
+    monkeypatch.setitem(sys.modules, "opentelemetry.instrumentation.sqlalchemy", None)
+    engine = create_engine("sqlite://")
+    # Should not raise despite the missing package.
+    telemetry.instrument_sqlalchemy_engine(engine)
+
+
+def test_httpx_to_fastapi_propagates_trace_across_http_hop(
+    in_memory_exporter: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A real HTTP hop continues the caller's trace.
+
+    With HTTPX client instrumentation (inject) and FastAPI server
+    instrumentation (extract) both active, a request made inside a
+    parent span must run its server-side handler in the *same* trace.
+    This is the Phase 1 propagation invariant that makes the
+    server -> runner -> harness HTTP/tunnel mesh render as one trace:
+    httpx injects ``traceparent``, FastAPI extracts it, and the handler
+    nests under the caller rather than rooting a new trace.
+    """
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+    from starlette.testclient import TestClient
+
+    monkeypatch.setenv("OMNIGENT_OTEL_FASTAPI_INSTRUMENTATION", "true")
+
+    app = FastAPI()
+    handler_trace_id: dict[str, str] = {}
+
+    @app.get("/ping")
+    def ping() -> dict[str, bool]:
+        """
+        Record the trace ID active inside the server handler.
+
+        :returns: A trivial JSON body.
+        """
+        ctx = otel_trace.get_current_span().get_span_context()
+        handler_trace_id["value"] = format(ctx.trace_id, "032x")
+        return {"ok": True}
+
+    telemetry.instrument_fastapi_app(app)
+    httpx_instrumentor = HTTPXClientInstrumentor()
+    was_instrumented = httpx_instrumentor.is_instrumented_by_opentelemetry
+    telemetry._instrument_httpx()
+    tracer = otel_trace.get_tracer("test")
+    try:
+        with telemetry.trace_context_for_response(response_id=_RESP_ID):
+            with tracer.start_as_current_span("client-call"):
+                # Starlette's TestClient runs on an instrumented httpx
+                # client, so the outbound request carries traceparent.
+                response = TestClient(app).get("/ping")
+                assert response.status_code == 200
+    finally:
+        if not was_instrumented:
+            httpx_instrumentor.uninstrument()
+        FastAPIInstrumentor.uninstrument_app(app)
+
+    # The server handler ran under the caller's derived trace, proving
+    # the traceparent crossed the HTTP boundary and was extracted.
+    assert handler_trace_id.get("value") == _RESP_HEX, (
+        f"server handler trace_id {handler_trace_id.get('value')!r} does "
+        f"not match caller trace {_RESP_HEX!r} — traceparent did not "
+        "propagate across the HTTP hop (inject or extract is broken)."
+    )
