@@ -941,12 +941,12 @@ class SqlAlchemyConversationStore(ConversationStore):
         Atomically increment the session usage for one conversation.
 
         Runs the read-modify-write in a single SQLAlchemy session (one DB
-        transaction). On PostgreSQL, ``SELECT ... FOR UPDATE`` locks the row
-        for the duration of the transaction so a concurrent second writer
-        blocks until this one commits, preventing lost updates (#9). On SQLite
-        the single-writer exclusive write lock serialises concurrent writers
-        naturally — no explicit ``FOR UPDATE`` is needed (and SQLite does not
-        support it).
+        transaction). On every dialect except SQLite, ``SELECT ... FOR UPDATE``
+        locks the row for the duration of the transaction so a concurrent second
+        writer blocks until this one commits, preventing lost updates (#9). This
+        covers PostgreSQL, MySQL, and MariaDB. On SQLite the single-writer
+        exclusive write lock serialises concurrent writers naturally — ``FOR
+        UPDATE`` is not supported and not needed.
 
         :param conversation_id: The conversation to update.
         :param delta: Usage increments (see
@@ -960,7 +960,11 @@ class SqlAlchemyConversationStore(ConversationStore):
         with self._session() as session:
             dialect = session.bind.dialect.name if session.bind is not None else ""
             q = select(SqlConversation).where(SqlConversation.id == conversation_id)
-            if dialect == "postgresql":
+            # SQLite serialises all writes via an exclusive write lock and does
+            # not support SELECT FOR UPDATE. Every other dialect (PostgreSQL,
+            # MySQL, MariaDB, …) supports it and needs it to prevent concurrent
+            # writers from interleaving their read-modify-write cycles.
+            if dialect != "sqlite":
                 q = q.with_for_update()
             row = session.scalars(q).first()
             current: dict[str, Any] = (

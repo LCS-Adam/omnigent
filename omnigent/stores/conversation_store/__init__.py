@@ -807,10 +807,11 @@ class ConversationStore(ABC):
 
         Reads the current JSON, applies *delta* (adding each key's value to the
         existing value, with ``by_model`` merged recursively), and writes back —
-        all within a single database transaction. On PostgreSQL, ``SELECT FOR
-        UPDATE`` acquires an exclusive row lock so concurrent calls for the same
-        conversation cannot interleave. On SQLite the single-writer exclusive
-        write lock provides the same guarantee. This prevents the read-modify-write
+        all within a single database transaction. On every dialect except SQLite,
+        ``SELECT FOR UPDATE`` acquires an exclusive row lock so concurrent calls
+        for the same conversation cannot interleave (covers PostgreSQL, MySQL,
+        MariaDB). On SQLite the single-writer exclusive write lock provides the
+        same guarantee without needing ``FOR UPDATE``. This prevents the read-modify-write
         race that caused concurrent relay completions to silently drop each
         other's cost / token deltas (#9).
 
