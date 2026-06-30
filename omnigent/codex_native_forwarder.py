@@ -1179,11 +1179,45 @@ class _SessionUsageCoalescer:
             return
         # Attach the model to every token-bearing post (not via the
         # changed-keys dedup, so it rides along even when only token
-        # counts changed) — the server reprices cumulative tokens into
-        # ``total_cost_usd`` per turn and needs the model each time.
+        # counts changed) — the server needs it to price cumulative
+        # tokens into ``total_cost_usd`` and for per-model attribution.
         payload: dict[str, Any] = dict(data)
         if self._model:
             payload["model"] = self._model
+        # Compute ``policy_cost_usd`` client-side from the cumulative token
+        # counts so the cost-budget gate sees a real-time figure mid-turn
+        # (issue #6). The server already prices tokens server-side into
+        # ``total_cost_usd``, but the policy engine prefers an explicit
+        # ``policy_cost_usd`` field and falls back to ``total_cost_usd``
+        # only when it's absent. Setting it here makes the enforcement
+        # value unambiguous and independent of server-side repricing timing.
+        #
+        # Token layout: Codex's ``cumulative_input_tokens`` is INCLUSIVE of
+        # cached tokens, so subtract ``cumulative_cache_read_input_tokens``
+        # to get the non-cached portion that ``compute_llm_cost`` expects
+        # (same split the server applies in ``_persist_external_session_usage``).
+        if self._model:
+            cin: int = self._pending.get("cumulative_input_tokens", 0)
+            cout: int = self._pending.get("cumulative_output_tokens", 0)
+            ccache: int = self._pending.get("cumulative_cache_read_input_tokens", 0)
+            if cin or cout:
+                from omnigent.llms.context_window import (
+                    compute_llm_cost,
+                    fetch_model_pricing,
+                )
+
+                pricing = fetch_model_pricing(self._model)
+                if pricing is not None:
+                    cached = min(ccache, cin)
+                    policy_cost = compute_llm_cost(
+                        {
+                            "input_tokens": cin - cached,
+                            "output_tokens": cout,
+                            "cache_read_input_tokens": cached,
+                        },
+                        pricing,
+                    )
+                    payload["policy_cost_usd"] = policy_cost
         response = await _post_session_event(
             self._client,
             self._session_id,

@@ -478,6 +478,86 @@ async def test_usage_coalescer_unseeded_omits_model() -> None:
     assert "model" not in body["data"]
 
 
+@pytest.mark.asyncio
+async def test_usage_coalescer_posts_policy_cost_usd_from_token_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """flush() computes and posts policy_cost_usd from cumulative token counts.
+
+    The cost-budget policy engine prefers an explicit ``policy_cost_usd`` field
+    over the server-computed ``total_cost_usd``. By computing cost client-side
+    from the cumulative token counts and posting it as ``policy_cost_usd``, the
+    coalescer gives the gate a real-time enforcement figure mid-turn (issue #6).
+
+    The cached-input split must be applied correctly: Codex's
+    ``cumulative_input_tokens`` is INCLUSIVE of cache reads, so the non-cached
+    portion passed to ``compute_llm_cost`` is
+    ``cumulative_input_tokens - cumulative_cache_read_input_tokens``.
+    """
+    from omnigent.llms.context_window import ModelPricing
+
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing",
+        lambda model: (
+            ModelPricing(input_per_token=1e-6, output_per_token=2e-6)
+            if model == "gpt-5.5"
+            else None
+        ),
+    )
+
+    client = _RecordingClient()
+    coalescer = fwd._SessionUsageCoalescer(client, "conv_x", model="gpt-5.5")
+    # 1000 total input (200 cached + 800 non-cached), 500 output.
+    # expected cost = 800*1e-6 + 200*1e-6 + 500*2e-6 = 0.0008 + 0.0002 + 0.001 = 0.0020
+    # (cache_read at input rate because ModelPricing has no separate cache rate)
+    coalescer.record(
+        {
+            "tokenUsage": {
+                "total": {
+                    "inputTokens": 1000,
+                    "outputTokens": 500,
+                    "cachedInputTokens": 200,
+                }
+            }
+        }
+    )
+    await coalescer.flush()
+
+    assert len(client.posts) == 1
+    data = client.posts[0][1]["data"]
+    assert data["cumulative_input_tokens"] == 1000
+    assert data["cumulative_output_tokens"] == 500
+    assert data["cumulative_cache_read_input_tokens"] == 200
+    assert "policy_cost_usd" in data
+    # non-cached input = 800 @ 1e-6 = 0.00080
+    # cache_read      = 200 @ 0.10 * 1e-6 (fallback ratio) = 0.00002
+    # output          = 500 @ 2e-6 = 0.00100
+    # total = 0.00182
+    assert data["policy_cost_usd"] == pytest.approx(0.00182)
+
+
+@pytest.mark.asyncio
+async def test_usage_coalescer_omits_policy_cost_usd_when_model_unpriced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No policy_cost_usd in the payload when the model has no catalog pricing.
+
+    An unpriced model must not block the turn (the gate fails open on $0).
+    The coalescer should omit the field entirely rather than posting $0.
+    """
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing",
+        lambda model: None,
+    )
+    client = _RecordingClient()
+    coalescer = fwd._SessionUsageCoalescer(client, "conv_x", model="unknown-model")
+    coalescer.record({"tokenUsage": {"total": {"inputTokens": 100, "outputTokens": 50}}})
+    await coalescer.flush()
+
+    data = client.posts[0][1]["data"]
+    assert "policy_cost_usd" not in data
+
+
 class _FlakyElicitationClient:
     """
     Elicitation client stub: configurable failures, then HTTP 200.
