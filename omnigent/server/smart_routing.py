@@ -29,12 +29,14 @@ MODEL_LISTS: dict[str, list[str]] = {
         "databricks-claude-opus-4-8",
     ],
     "gpt": [
+        "databricks-gpt-5-4-nano",
         "databricks-gpt-5-4-mini",
         "databricks-gpt-5-4",
         "databricks-gpt-5-5",
     ],
     # pi is multi-model: Claude and GPT both available.
     "pi": [
+        "databricks-gpt-5-4-nano",
         "databricks-claude-haiku-4-5",
         "databricks-gpt-5-4-mini",
         "databricks-claude-sonnet-4-6",
@@ -112,9 +114,9 @@ Available models (ordered fastest/cheapest to most capable/expensive):
 Model naming conventions:
 - Claude family: haiku is the fastest and most lightweight; sonnet is
   a balanced mid-range; opus is the most powerful and thorough.
-- GPT family: models with a "mini" suffix are faster and lighter;
-  higher version numbers (e.g. gpt-5-5 vs gpt-5-4) indicate newer,
-  more capable releases.
+- GPT family: nano is the most lightweight, then mini, then the base
+  model; higher version numbers (e.g. gpt-5-5 vs gpt-5-4) indicate
+  newer, more capable releases.
 - The list order reflects relative speed, cost, and capability for
   this deployment — models later in the list are slower and more
   expensive but produce higher-quality results on complex tasks.
