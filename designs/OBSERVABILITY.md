@@ -414,6 +414,15 @@ replay/diff tooling for transcript reconstruction, fork, and resume.
 - **Runner app instrumentation.** Confirm the runner's ASGI app is FastAPI-instrumented,
   not only the server's (`app.py:1254`); the verbatim-header propagation across the
   tunnel depends on it.
+- **Custom-transport client gap (resolved).** The process-wide `HTTPXClientInstrumentor`
+  only patches httpx's *standard* transports. The server→runner client is built on the
+  custom `WSTunnelTransport` (`runner/routing.py:_client_for_runner`), so it was invisible
+  to the global hook: the forward injected no `traceparent` and the runner rooted a
+  *disconnected* trace even though the hop is a synchronous RPC. Fixed by instrumenting
+  that cached client instance directly via `telemetry.instrument_httpx_client` so the
+  server→runner forward stays in the caller's trace. (The downstream turn — claude-native
+  `tmux send-keys` + the log-polling forwarder — is a separate async boundary and is *not*
+  covered by this; it remains its own trace, correlated by `conversation_id`.)
 - **PII / secrets.** `OMNIGENT_OTEL_CAPTURE_CONTENT` must remain **off** outside dev;
   the durable event log (§9), not spans, is the right home for full payloads with proper
   access controls.

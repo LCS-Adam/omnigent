@@ -886,3 +886,61 @@ def test_httpx_to_fastapi_propagates_trace_across_http_hop(
         f"not match caller trace {_RESP_HEX!r} — traceparent did not "
         "propagate across the HTTP hop (inject or extract is broken)."
     )
+
+
+def test_instrument_httpx_client_injects_over_custom_transport(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """
+    A client on a custom transport propagates only after instrument_client.
+
+    The process-wide httpx instrumentation patches only httpx's *standard*
+    transports, so a client built on a custom ``AsyncBaseTransport`` — the
+    server->runner ``WSTunnelTransport`` — is invisible to it: outbound
+    requests carry no ``traceparent`` and the runner roots a disconnected
+    trace. :func:`telemetry.instrument_httpx_client` wraps the instance to
+    close that gap. This guards the server->runner forward staying in the
+    caller's trace; without the per-client instrumentation the dispatch
+    hop silently splits into two traces again.
+    """
+    import asyncio
+
+    import httpx
+
+    captured: dict[str, dict[str, str]] = {}
+
+    class _CapturingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            captured["headers"] = dict(request.headers)
+            return httpx.Response(200, request=request)
+
+    tracer = otel_trace.get_tracer("test")
+
+    async def _call(client: httpx.AsyncClient) -> None:
+        with telemetry.trace_context_for_response(response_id=_RESP_ID):
+            with tracer.start_as_current_span("client-call"):
+                await client.get("http://runner/v1/ping")
+        await client.aclose()
+
+    # Baseline: a custom transport is not reached by the global hook, so no
+    # context rides along regardless of whether global httpx is instrumented.
+    captured.clear()
+    bare = httpx.AsyncClient(transport=_CapturingTransport(), base_url="http://runner")
+    asyncio.run(_call(bare))
+    assert "traceparent" not in captured["headers"], (
+        "a custom-transport client unexpectedly injected traceparent without "
+        "instrument_client — the per-client fix may be unnecessary; re-evaluate."
+    )
+
+    # After instrument_client the traceparent rides the custom transport,
+    # pinned to the caller's response-derived trace.
+    captured.clear()
+    wrapped = httpx.AsyncClient(transport=_CapturingTransport(), base_url="http://runner")
+    telemetry.instrument_httpx_client(wrapped)
+    asyncio.run(_call(wrapped))
+    traceparent = captured["headers"].get("traceparent")
+    assert traceparent is not None and _RESP_HEX in traceparent, (
+        f"traceparent {traceparent!r} missing or not pinned to caller trace "
+        f"{_RESP_HEX!r} after instrument_client — the server->runner forward "
+        "would not stay in the originating trace."
+    )

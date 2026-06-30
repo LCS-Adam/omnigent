@@ -244,6 +244,39 @@ def _instrument_httpx() -> None:
         _logger.exception("failed to initialize HTTPX OpenTelemetry instrumentation")
 
 
+def instrument_httpx_client(client: Any) -> None:
+    """
+    Instrument a single httpx client built on a custom transport.
+
+    The process-wide :func:`_instrument_httpx` only patches httpx's
+    *standard* transports' request methods. A client constructed with a
+    custom :class:`~httpx.AsyncBaseTransport` — notably the server→runner
+    ``WSTunnelTransport`` — defines its own ``handle_async_request`` and
+    is therefore invisible to that global hook: its outbound requests
+    carry no ``traceparent`` and emit no client span, so the runner roots
+    a fresh trace instead of nesting under the caller's span.
+
+    ``instrument_client`` wraps the client *instance* directly, which does
+    work over a custom transport. Calling it on the cached per-runner
+    client makes the synchronous event-forward propagate the active trace
+    context across the tunnel, so the runner's request span becomes a
+    child of the originating server request — one connected trace across
+    the server→runner boundary.
+
+    Best-effort: failures degrade quietly — tracing must never break
+    request handling.
+
+    :param client: The ``httpx.AsyncClient`` (or sync ``Client``) to
+        instrument in place.
+    """
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+        HTTPXClientInstrumentor.instrument_client(client)
+    except Exception:
+        _logger.exception("failed to instrument httpx client over custom transport")
+
+
 def instrument_sqlalchemy_engine(engine: Any) -> None:
     """
     Install OpenTelemetry instrumentation on a single SQLAlchemy engine.
