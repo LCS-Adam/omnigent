@@ -8658,7 +8658,12 @@ async def _forward_event_to_runner(
         _harness = _resolve_harness(conv)
         _user_text = _extract_user_text_for_routing(body)
         if _user_text:
-            _routed_model, _verdict = await route_turn(_harness, _user_text)
+            _routed_model, _verdict = await route_turn(
+                _harness,
+                _user_text,
+                session_id=session_id,
+                runner_client=runner_client,
+            )
             if _routed_model is not None:
                 effective_runner_override = _routed_model
                 # Persist as the session's model_override so all
@@ -8878,7 +8883,13 @@ async def _dispatch_session_event_to_runner(
             _harness = _resolve_harness(conv)
             _user_text = _extract_user_text_for_routing(body)
             if _user_text:
-                _routed_model, _verdict = await route_turn(_harness, _user_text)
+                _native_runner_client = await _get_runner_client(session_id, runner_router)
+                _routed_model, _verdict = await route_turn(
+                    _harness,
+                    _user_text,
+                    session_id=session_id,
+                    runner_client=_native_runner_client,
+                )
                 if _routed_model is not None:
                     try:
                         await asyncio.to_thread(
@@ -12831,6 +12842,9 @@ async def _handle_advise_models_mcp(
     conv: Any,
     arguments: dict[str, Any],
     agent_store: Any,
+    *,
+    session_id: str | None = None,
+    runner_router: Any = None,
 ) -> Response:
     """
     Server-side handler for ``sys_advise_models`` MCP tool calls.
@@ -12856,7 +12870,18 @@ async def _handle_advise_models_mcp(
         return _mcp_tool_result(rpc_id, json.dumps({"router_on": False, "recommendations": []}))
 
     from omnigent.model_catalog import spec_harness
-    from omnigent.server.smart_routing import infer_models
+    from omnigent.server.smart_routing import fetch_runner_models, infer_models
+
+    # Fetch live model catalog from the runner once; used below to populate
+    # per-agent model lists when the caller omits explicit models.
+    # Keys are worker names ("self", "claude_code", etc.) as returned by
+    # catalog_for_spec.  None when runner is unreachable — falls back to
+    # infer_models static table.
+    _runner_catalog: dict[str, list[str]] | None = None
+    if session_id is not None and runner_router is not None:
+        _runner_client = await _get_runner_client(session_id, runner_router)
+        if _runner_client is not None:
+            _runner_catalog = await fetch_runner_models(session_id, _runner_client)
 
     # Resolve the parent agent spec to look up sub-agent harnesses.
     spec: Any | None = None
@@ -12905,10 +12930,15 @@ async def _handle_advise_models_mcp(
         if not isinstance(agents_spec, list) or not agents_spec:
             continue
 
-        # Build a combined model list from all agent entries,
-        # preserving cheapest→powerful order. Map chosen model → agent.
+        # Build harness→models map for the routing client, plus two reverse
+        # maps for resolving the chosen agent after the verdict:
+        # - harness_to_agent: preferred path when the judge picks a harness
+        # - model_to_agent: fallback when harness is absent or unrecognised
+        # Insertion order is preserved; first-agent-wins dedup applies when
+        # the same model appears in multiple harness lists.
         model_to_agent: dict[str, str] = {}
-        combined_models: list[str] = []
+        harness_to_agent: dict[str, str] = {}
+        harness_models: dict[str, list[str]] = {}
         for agent_entry in agents_spec:
             if not isinstance(agent_entry, dict):
                 continue
@@ -12917,22 +12947,33 @@ async def _handle_advise_models_mcp(
             if explicit_models is not None and not isinstance(explicit_models, list):
                 explicit_models = None
             if explicit_models:
+                harness_key = agent  # use agent name as key when models are explicit
                 candidates = explicit_models
             else:
-                harness = _resolve_harness_for_worker(agent)
-                candidates = infer_models(harness) or []
-            for m in candidates:
-                if m not in model_to_agent:
-                    model_to_agent[m] = agent
-                    combined_models.append(m)
+                harness_key = _resolve_harness_for_worker(agent) or agent
+                # Prefer live runner catalog (worker name or harness key);
+                # fall back to static infer_models table.
+                candidates = (
+                    (_runner_catalog or {}).get(agent)
+                    or (_runner_catalog or {}).get(harness_key)
+                    or infer_models(harness_key)
+                    or []
+                )
+            if candidates:
+                harness_models.setdefault(harness_key, [])
+                harness_to_agent.setdefault(harness_key, agent)
+                for m in candidates:
+                    if m not in model_to_agent:
+                        model_to_agent[m] = agent
+                        harness_models[harness_key].append(m)
 
-        if not combined_models:
+        if not harness_models:
             recommendations.append(
                 {"title": title, "agent": None, "model": None, "rationale": "no candidates"}
             )
             continue
         try:
-            verdict = await routing_client.route(task_text, combined_models)
+            verdict = await routing_client.route(task_text, harness_models)
         except Exception:  # routing failures must not crash the advisor
             _logger.exception("_handle_advise_models_mcp: route failed task=%r", title)
             verdict = None
@@ -12946,7 +12987,10 @@ async def _handle_advise_models_mcp(
                 }
             )
         else:
-            chosen_agent = model_to_agent.get(verdict.model)
+            # Prefer the judge's harness pick; fall back to model ownership.
+            chosen_agent = (
+                harness_to_agent.get(verdict.harness) if verdict.harness else None
+            ) or model_to_agent.get(verdict.model)
             recommendations.append(
                 {
                     "title": title,
@@ -13410,7 +13454,14 @@ async def _handle_mcp_tools_call(
     # After policy evaluation (DENY/ASK handled above); arguments may have
     # been transformed. The advisor runs server-side where routing_client lives.
     if namespaced_name in ("sys_advise_models", "mcp__omnigent__sys_advise_models"):
-        return await _handle_advise_models_mcp(rpc_id, conv, arguments, agent_store)
+        return await _handle_advise_models_mcp(
+            rpc_id,
+            conv,
+            arguments,
+            agent_store,
+            session_id=session_id,
+            runner_router=runner_router,
+        )
 
     # ── Execute on the runner via WS tunnel ──────────────────────────
     # The runner owns stdio subprocess spawning (correct machine, cwd,
