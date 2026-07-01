@@ -229,6 +229,9 @@ class FullServerDriver:
                 ):
                     return
             except httpx.HTTPError:
+                # Connection refused / read errors are expected while the
+                # server and runner are still coming up; keep polling until
+                # they answer or the timeout below fires.
                 pass
             time.sleep(_POLL_INTERVAL_S)
         raise RuntimeError(
