@@ -10998,7 +10998,6 @@ async def _evaluate_input_policy(
         return {
             "verdict": "deny",
             "reason": exc.args[0] or "Denied by policy",
-            "abort": True,
         }
     if approved:
         return None
@@ -16301,12 +16300,11 @@ def create_sessions_router(
                                 elicitation_id=hook_elicitation_id,
                             )
                         except ElicitationDeclinedError as exc:
-                            # Explicit user decline — signal the harness to
-                            # abort the turn rather than let it continue.
+                            # Explicit user decline — return DENY so the
+                            # native harness blocks this specific tool call.
                             verdict_body = {
                                 "result": "POLICY_ACTION_DENY",
                                 "reason": exc.args[0] or "Approval was declined.",
-                                "abort": True,
                             }
                             return Response(
                                 content=json.dumps(verdict_body),

@@ -459,9 +459,12 @@ class ExecutorAdapter(HarnessApp):
                             agent_span = None
                         raise RuntimeError(f"inner executor error: {event.message}")
         except ElicitationDeclinedError:
-            # User explicitly declined an elicitation — abort the turn cleanly
-            # (cancelled, not failed) so the LLM does not receive a DENY message
-            # and continue. The finally block still runs for cleanup.
+            # Fallback for executors that propagate the exception directly
+            # (non-SDK / non-spawned-task paths). SDK-based executors use
+            # ctx.cancelled.set() from _stable_elicitation_handler instead,
+            # because the SDK wraps its control-request callbacks in their
+            # own tasks and would swallow a raised exception before it
+            # reached this handler. Either way the turn ends as cancelled.
             _logger.info(
                 "elicitation explicitly declined for response %s — aborting turn",
                 ctx.response_id,
@@ -755,10 +758,12 @@ class ExecutorAdapter(HarnessApp):
         )
         result = await ctx.elicit(elicitation_id, params)
         if result.action == "decline":
-            raise ElicitationDeclinedError(
-                f"{label} permission for {tool_name!r} explicitly declined",
-                policy_name=policy_name,
-            )
+            # The SDK invokes this callback from a spawned control-request
+            # task whose try/except would swallow a raised exception before
+            # it could reach run_turn's except block. Signal the cancellation
+            # via ctx.cancelled instead — the run_turn event loop checks this
+            # flag between events and takes the existing interrupt path.
+            ctx.cancelled.set()
         return result.action == "accept"
 
     async def _stable_policy_evaluator(
