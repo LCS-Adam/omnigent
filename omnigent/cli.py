@@ -3285,6 +3285,10 @@ def server(
     )
     try:
         _ShutdownSignalingServer(_config).run()
+    except KeyboardInterrupt:
+        # uvicorn.run() swallows KeyboardInterrupt; match that behaviour so
+        # a Ctrl-C exit doesn't print Click's "Aborted!" or exit non-zero.
+        pass
     finally:
         if _is_canonical_local_server:
             clear_local_server_record()
