@@ -498,7 +498,7 @@ POLICY_REGISTRY: list[dict[str, Any]] = [
     {
         "handler": "omnigent.policies.builtins.routing.intent_based_authorization",
         "kind": "factory",
-        "name": "Intent Gate",
+        "name": "Intent Based Authorization",
         "description": (
             "Enforces intent-based permissioning: records the user's first message "
             "as the authoritative session intent, then gates every tool call against "
