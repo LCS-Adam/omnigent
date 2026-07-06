@@ -17288,15 +17288,17 @@ async def test_start_claude_transcript_forwarder_if_needed_starts_when_missing(
     supervisor task died while tmux is still live, this helper must start a new
     one without double-registering a live incumbent.
     """
-    import omnigent.runner.app as runner_app_mod
+    from omnigent.runner import app as runner_app
 
     session_id = "conv_fwd_restart"
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
     started: list[dict[str, object]] = []
+    run = _ForwarderRun()
 
     async def _fake_supervise(**kwargs: object) -> None:
         started.append(kwargs)
+        run.task = asyncio.current_task()
         await asyncio.Event().wait()
 
     monkeypatch.setattr(
@@ -17306,7 +17308,7 @@ async def test_start_claude_transcript_forwarder_if_needed_starts_when_missing(
     monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
 
     try:
-        assert await runner_app_mod._start_claude_transcript_forwarder_if_needed(
+        assert await runner_app._start_claude_transcript_forwarder_if_needed(
             session_id,
             bridge_dir,
             start_at_end=False,
@@ -17317,18 +17319,15 @@ async def test_start_claude_transcript_forwarder_if_needed_starts_when_missing(
         assert started[0]["bridge_dir"] == bridge_dir
 
         # Second call is a no-op while the first task is still live.
-        assert not await runner_app_mod._start_claude_transcript_forwarder_if_needed(
+        assert not await runner_app._start_claude_transcript_forwarder_if_needed(
             session_id,
             bridge_dir,
             start_at_end=False,
         )
         assert len(started) == 1
     finally:
-        task = runner_app_mod._AUTO_FORWARDER_TASKS.pop(session_id, None)
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        runner_app._AUTO_FORWARDER_TASKS.pop(session_id, None)
+        await _drain_forwarder_runs([run])
 
 
 @pytest.mark.asyncio

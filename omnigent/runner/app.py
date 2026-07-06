@@ -394,7 +394,7 @@ async def _start_claude_transcript_forwarder_if_needed(
 
     from omnigent.claude_native_forwarder import supervise_forwarder
     from omnigent.cli_auth import databricks_request_headers
-    from omnigent.runner._entry import _RunnerDatabricksAuth, _make_auth_token_factory
+    from omnigent.runner._entry import _make_auth_token_factory, _RunnerDatabricksAuth
 
     server_url = os.environ.get("RUNNER_SERVER_URL", "http://localhost:6767")
     auth_factory = _make_auth_token_factory()
@@ -416,12 +416,98 @@ async def _start_claude_transcript_forwarder_if_needed(
     )
     _register_auto_forwarder_task(session_id, forwarder_task)
     _logger.info(
-        "Started claude transcript forwarder for session %s bridge_dir=%s task=%s",
+        "Started claude transcript forwarder for session %s task=%s",
         session_id,
-        bridge_dir,
         forwarder_task.get_name(),
     )
     return True
+
+
+def _session_items_include_assistant(items: list[dict[str, Any]]) -> bool:
+    """
+    Return whether committed session items already include assistant turns.
+
+    Used when healing a dead forwarder with no persisted cursor: a cold-resumed
+    session already mirrors prior assistant history in Omnigent, so the forwarder
+    should seek past the synthesized transcript prefix. A fresh session whose
+    assistant output exists only in the local transcript must replay from the
+    start so Chat can catch up.
+
+    :param items: Flat session item dicts from ``GET /v1/sessions/{id}/items``.
+    :returns: ``True`` when at least one item has role ``assistant``.
+    """
+    return any(isinstance(item, dict) and item.get("role") == "assistant" for item in items)
+
+
+async def _claude_forwarder_start_at_end_for_heal(
+    server_client: httpx.AsyncClient,
+    session_id: str,
+    bridge_dir: Path,
+) -> bool:
+    """
+    Resume-aware ``start_at_end`` when restarting a dead claude forwarder.
+
+    Mirrors ``_auto_create_claude_terminal``'s ``resume_external_session_id``
+    decision read-only. When a persisted forwarder cursor exists,
+    ``start_at_end`` is ignored by ``supervise_forwarder``; otherwise a cold
+    resume must seek past the replayed transcript while a fresh session whose
+    assistant turns never reached Omnigent must replay from the beginning.
+
+    :param server_client: Omnigent server client for session/item lookup.
+    :param session_id: Omnigent session/conversation id.
+    :param bridge_dir: Native Claude bridge directory.
+    :returns: ``True`` when a cold forwarder should skip an existing transcript
+        prefix; ``False`` when it should replay from the start.
+    """
+    from omnigent.claude_native_forwarder import _read_forward_state
+
+    if _read_forward_state(bridge_dir) is not None:
+        return False
+
+    workspace = Path(
+        os.environ.get("OMNIGENT_RUNNER_WORKSPACE", str(Path.cwd()))
+    ).resolve()
+
+    try:
+        resp = await server_client.get(
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
+            timeout=10.0,
+        )
+    except httpx.HTTPError:
+        return False
+    if resp.status_code != 200:
+        return False
+    snap = resp.json()
+    external_session_id = snap.get("external_session_id")
+    if not isinstance(external_session_id, str) or not external_session_id:
+        return False
+
+    from omnigent.claude_native import (
+        _CLAUDE_SESSION_ID_RE,
+        _claude_project_dir_for_cwd,
+        _claude_transcript_records_from_session_items,
+        _fetch_all_session_items_for_claude_resume,
+    )
+
+    if not _CLAUDE_SESSION_ID_RE.fullmatch(external_session_id):
+        return False
+    transcript_path = _claude_project_dir_for_cwd(workspace) / f"{external_session_id}.jsonl"
+    if not (transcript_path.is_file() and transcript_path.stat().st_size > 0):
+        return False
+
+    try:
+        items = await _fetch_all_session_items_for_claude_resume(server_client, session_id)
+    except Exception:  # noqa: BLE001 — best-effort heal decision
+        return False
+    records = _claude_transcript_records_from_session_items(
+        items,
+        session_id=session_id,
+        external_session_id=external_session_id,
+        cwd=workspace,
+    )
+    if not records:
+        return False
+    return _session_items_include_assistant(items)
 
 
 async def _ensure_claude_forwarder_for_session(
@@ -452,10 +538,15 @@ async def _ensure_claude_forwarder_for_session(
         session_id=session_id,
     )
     bridge_dir = bridge_dir_for_bridge_id(bridge_id or session_id)
+    start_at_end = await _claude_forwarder_start_at_end_for_heal(
+        server_client,
+        session_id,
+        bridge_dir,
+    )
     await _start_claude_transcript_forwarder_if_needed(
         session_id,
         bridge_dir,
-        start_at_end=False,
+        start_at_end=start_at_end,
     )
 
 
@@ -5498,7 +5589,7 @@ async def _auto_create_claude_terminal(
     # which launch Claude in a brand-new, untrusted directory.
     ensure_claude_workspace_trusted(Path(workspace))
 
-    from omnigent.runner._entry import _make_auth_token_factory, _RunnerDatabricksAuth
+    from omnigent.runner._entry import _make_auth_token_factory
 
     # The Omnigent server URL + auth are needed in two places below: the
     # PermissionRequest hook (so Claude's approval prompts route to the
@@ -16652,7 +16743,7 @@ def create_runner_app(
         if terminal_registry is None:
             return
         if terminal_registry.get(conv_id, terminal_name, "main") is not None:
-            if harness_name == "claude-native":
+            if terminal_name == "claude":
                 await _ensure_claude_forwarder_for_session(
                     conv_id,
                     server_client=server_client,
