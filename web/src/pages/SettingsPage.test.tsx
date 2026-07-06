@@ -137,6 +137,41 @@ describe("SettingsPage", () => {
     expect(screen.getByTestId("ui-font-size-inc")).not.toBeDisabled();
   });
 
+  it("shows the empty font family default and applies + persists a typed name", () => {
+    localStorage.clear();
+    document.documentElement.style.removeProperty("--ui-font-family");
+    renderPage("/settings/appearance");
+    const input = screen.getByTestId("ui-font-family-input") as HTMLInputElement;
+    // No stored preference → empty input, System-default placeholder, no override.
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("System default");
+    expect(document.documentElement.style.getPropertyValue("--ui-font-family")).toBe("");
+    // Reset has nothing to do at the default.
+    expect(screen.getByTestId("ui-font-family-reset")).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: "Inter" } });
+    expect(input.value).toBe("Inter");
+    // The choice is persisted so it survives a refresh...
+    expect(localStorage.getItem("omnigent:ui-font-family")).toBe(JSON.stringify("Inter"));
+    // ...and applied live to the document root.
+    expect(document.documentElement.style.getPropertyValue("--ui-font-family")).toBe("Inter");
+    expect(screen.getByTestId("ui-font-family-reset")).not.toBeDisabled();
+  });
+
+  it("reset restores the system default font family", () => {
+    localStorage.setItem("omnigent:ui-font-family", JSON.stringify("Georgia"));
+    renderPage("/settings/appearance");
+    const input = screen.getByTestId("ui-font-family-input") as HTMLInputElement;
+    // The control reflects the stored preference on mount.
+    expect(input.value).toBe("Georgia");
+
+    fireEvent.click(screen.getByTestId("ui-font-family-reset"));
+    // Reset clears the field, the applied property, and the stored key.
+    expect(input.value).toBe("");
+    expect(document.documentElement.style.getPropertyValue("--ui-font-family")).toBe("");
+    expect(localStorage.getItem("omnigent:ui-font-family")).toBeNull();
+  });
+
   it("defaults bare /settings to Account when a login session exists, else Appearance", async () => {
     // Login session (accounts OR OIDC) → Account leads, so /settings lands on it.
     renderPage("/settings");

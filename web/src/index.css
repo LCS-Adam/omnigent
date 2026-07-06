@@ -109,6 +109,11 @@
    * the whole rem-based UI scales. Overridden at runtime on documentElement. */
   --ui-font-scale: 1;
 
+  /* User-controlled UI font family (see Appearance settings /
+   * lib/uiFontPreferences.ts). Deliberately left unset here so the `html` rule's
+   * `var(--ui-font-family, var(--font-sans))` falls back to the system stack;
+   * the Appearance setting sets it at runtime on documentElement. */
+
   /* ---- Inset system -------------------------------------------------------
    * Single source of truth for how far content must stay clear of screen
    * chrome. The SAME bundle runs in a browser, in Electron, and inside the
@@ -722,7 +727,12 @@
     overflow: hidden;
   }
   html {
-    @apply font-sans;
+    /* Font family for the whole inherited UI. Can't `@apply font-sans`: Tailwind
+     * v4's `@theme inline` inlines the literal stack, so a runtime `--font-sans`
+     * override is a no-op. Read a dedicated `--ui-font-family` (set on
+     * documentElement by the Appearance setting / lib/uiFontPreferences.ts)
+     * with the system stack as the fallback when it's unset. */
+    font-family: var(--ui-font-family, var(--font-sans));
     /* Root size for the whole rem-based UI. `1em` resolves against the
      * browser default so a customized default is preserved; --ui-font-scale
      * layers the user's Appearance choice on top. */
