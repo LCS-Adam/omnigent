@@ -525,6 +525,68 @@ async def test_provisioning_failure_skips_and_tears_down(monkeypatch: pytest.Mon
     assert torn_down == [True], "provisioning-failure path must tear down the driver"
 
 
+async def test_expected_provisioning_error_logged_quietly(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """A ProvisioningError skips at INFO (no traceback); a generic error warns.
+
+    The branch split keeps the matrix readable: a known-unrunnable environment
+    (own-auth native not logged in) logs only its reason, while an unexpected
+    exception keeps its full stack so a genuine driver bug can't hide behind a
+    green-looking skip.
+    """
+    import logging
+
+    from tests.harness_bench.driver import ProvisioningError
+
+    def _driver_raising(exc: Exception):
+        class _D:
+            transport = "stub"
+
+            def __init__(self, profile, *, databricks_profile: str) -> None:
+                pass
+
+            @staticmethod
+            def unavailable(profile, *, databricks_profile):
+                return None
+
+            async def __aenter__(self):
+                raise exc
+
+            async def __aexit__(self, *e: object) -> None:
+                pass
+
+        return _D
+
+    profile = BenchProfile(harness="stub", model="m", env_prefix="HARNESS_STUB_", marker="X")
+
+    # Expected failure → a single INFO record, no exception/traceback attached.
+    monkeypatch.setattr(
+        "tests.harness_bench.bench.resolve_driver_class",
+        lambda p, *, override=None, fast=False: _driver_raising(
+            ProvisioningError("cli not logged in")
+        ),
+    )
+    with caplog.at_level(logging.INFO, logger="tests.harness_bench.bench"):
+        await run_harness(profile, databricks_profile="oss", live=True)
+    provisioning_logs = [r for r in caplog.records if "stub" in r.getMessage()]
+    assert provisioning_logs, "expected a log line for the skip"
+    assert all(r.levelno == logging.INFO and r.exc_info is None for r in provisioning_logs)
+
+    # Unexpected failure → WARNING with the traceback attached.
+    caplog.clear()
+    monkeypatch.setattr(
+        "tests.harness_bench.bench.resolve_driver_class",
+        lambda p, *, override=None, fast=False: _driver_raising(RuntimeError("boom")),
+    )
+    with caplog.at_level(logging.INFO, logger="tests.harness_bench.bench"):
+        await run_harness(profile, databricks_profile="oss", live=True)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings and any(r.exc_info is not None for r in warnings), (
+        "an unexpected provisioning failure must keep its traceback"
+    )
+
+
 # ── native-tui transport (offline) ──────────────────────────────
 
 

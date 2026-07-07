@@ -74,7 +74,7 @@ from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
 from tests._helpers.compat import apply_runner_env, compat_runner_cwd, runner_executable
 from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.e2e.helpers import lookup_databricks_host
-from tests.harness_bench.driver import TurnResult
+from tests.harness_bench.driver import ProvisioningError, TurnResult
 from tests.harness_bench.full_server import (
     _find_free_port,
     _mint_bearer,
@@ -353,7 +353,7 @@ class NativeTuiDriver:
             if snap.status_code == 200 and snap.json().get("external_session_id"):
                 return
             time.sleep(_POLL_INTERVAL_S)
-        raise RuntimeError(
+        raise ProvisioningError(
             f"native forwarder did not wire up within {_FORWARDER_READY_TIMEOUT_S}s "
             f"(no external_session_id); logs in {self._tmp}"
         )

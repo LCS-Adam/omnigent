@@ -16,6 +16,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from tests.harness_bench.driver import ProvisioningError
 from tests.harness_bench.events import (
     HarnessFinished,
     HarnessSkipped,
@@ -230,10 +231,16 @@ async def run_harness(
         # __aenter__ may have already spawned the server + daemon and opened a
         # client before raising, so tear those down here or they leak for the
         # rest of the run (_teardown null-checks each, so a half-provisioned
-        # driver is safe to tear down). Log the traceback: this branch also
-        # catches genuine driver bugs (e.g. an AssertionError), which must not
-        # vanish silently behind a green-looking skip.
-        _logger.warning("provisioning failed for %s", profile.harness, exc_info=True)
+        # driver is safe to tear down).
+        #
+        # An expected ProvisioningError (a known-unrunnable environment) logs
+        # only its reason — the matrix already shows the skip. Any *other*
+        # exception is a possible driver bug (e.g. an AssertionError), so keep
+        # its full traceback rather than letting it vanish behind a green skip.
+        if isinstance(exc, ProvisioningError):
+            _logger.info("skipping %s: %s", profile.harness, exc)
+        else:
+            _logger.warning("provisioning failed for %s", profile.harness, exc_info=True)
         with contextlib.suppress(Exception):
             await driver_cm.__aexit__(type(exc), exc, exc.__traceback__)
         reason = f"provisioning failed: {exc}"
