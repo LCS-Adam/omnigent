@@ -25,6 +25,7 @@ import asyncio
 import sys
 
 from tests.harness_bench.bench import run_bench
+from tests.harness_bench.events import LineSink
 from tests.harness_bench.manifest import OFFICIAL_PROFILES
 from tests.harness_bench.profile import BenchProfile, resolve_profile
 from tests.harness_bench.report import render_json, render_markdown, render_table
@@ -203,12 +204,13 @@ def _select_progress_sink(rich_flag: bool | None):
     auto (rich on a TTY, plain otherwise). Falls back to the plain
     :class:`LineSink` whenever rich is unavailable or not a terminal.
     """
-    from tests.harness_bench.events import LineSink
 
     def _line(msg: str) -> None:
         print(msg, file=sys.stderr, flush=True)
 
     if rich_flag is not False:
+        # richreport is imported lazily: it is the only place that touches the
+        # optional `rich` dependency, so a plain/no-rich run never imports it.
         from tests.harness_bench.richreport import rich_sink_or_none
 
         rich_sink = rich_sink_or_none(force=bool(rich_flag))

@@ -299,7 +299,6 @@ async def test_parallel_full_server_shares_one_server(monkeypatch: pytest.Monkey
     agent+session on it.
     """
     import tests.harness_bench.bench as bench_mod
-    import tests.harness_bench.full_server_driver as fs_mod
     from tests.harness_bench.driver import TurnResult
 
     built: list[object] = []
@@ -355,7 +354,8 @@ async def test_parallel_full_server_shares_one_server(monkeypatch: pytest.Monkey
         async def run_interrupt_turn(self) -> TurnResult:
             return TurnResult(cancelled=True)
 
-    monkeypatch.setattr(fs_mod, "SharedFullServer", _FakeShared)
+    # bench imports SharedFullServer into its own namespace, so patch it there.
+    monkeypatch.setattr(bench_mod, "SharedFullServer", _FakeShared)
     monkeypatch.setattr(bench_mod, "resolve_driver_class", lambda p, *, override: _FSDriver)
 
     profiles = [

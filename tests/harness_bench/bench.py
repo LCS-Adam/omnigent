@@ -20,10 +20,12 @@ from tests.harness_bench.events import (
     HarnessFinished,
     HarnessSkipped,
     HarnessStarted,
+    LineSink,
     ProbeFinished,
     ProbeStarted,
     ProgressSink,
 )
+from tests.harness_bench.full_server import SharedFullServer
 from tests.harness_bench.probes import ALL_PROBES, CapabilityProbe
 from tests.harness_bench.profile import BenchProfile
 from tests.harness_bench.transport import resolve_driver_class
@@ -151,8 +153,6 @@ def _as_sink(progress: Progress | ProgressSink | None) -> ProgressSink | None:
         return None
     if isinstance(progress, ProgressSink):
         return progress
-    from tests.harness_bench.events import LineSink
-
     return LineSink(progress)  # a bare callable → line output
 
 
@@ -356,8 +356,6 @@ async def _maybe_shared_full_server(
             if resolve_driver_class(p, override=transport).transport == "full-server"
         ]
         if len(full) > 1:
-            from tests.harness_bench.full_server_driver import SharedFullServer
-
             shared = SharedFullServer(databricks_profile)
             await asyncio.to_thread(shared.__enter__)
     try:

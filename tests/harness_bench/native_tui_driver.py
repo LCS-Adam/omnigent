@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -61,6 +62,8 @@ from typing import Any
 
 import httpx
 
+from omnigent.harness_capabilities import AuthModel, IntegrationMode
+from omnigent.harness_plugins import harness_capabilities
 from omnigent.host.daemon_launch import (
     launch_or_reuse_daemon_runner,
     wait_for_host_online,
@@ -69,9 +72,10 @@ from omnigent.host.daemon_launch import (
 from omnigent.native_terminal import bind_session_runner
 from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
 from tests._helpers.compat import apply_runner_env, compat_runner_cwd, runner_executable
+from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.e2e.helpers import lookup_databricks_host
 from tests.harness_bench.driver import TurnResult
-from tests.harness_bench.full_server_driver import (
+from tests.harness_bench.full_server import (
     _find_free_port,
     _mint_bearer,
     spawn_omnigent_server,
@@ -163,9 +167,6 @@ def native_vendor(harness: str) -> NativeVendor | None:
     ``native-server`` harnesses (e.g. opencode-native) are a different
     transport and return ``None``.
     """
-    from omnigent.harness_capabilities import AuthModel, IntegrationMode
-    from omnigent.harness_plugins import harness_capabilities
-
     caps = harness_capabilities().get(harness)
     if caps is None or caps.integration_mode is not IntegrationMode.NATIVE_TUI:
         return None
@@ -221,8 +222,6 @@ class NativeTuiDriver:
         # host; the bench cannot provision a login. Presence on PATH is the
         # cheapest precondition we can check — a missing login still fails the
         # live turn, reported as a capability-neutral skip by the probes.
-        from tests.e2e._harness_probes import cli_unavailable_reason
-
         binary = profile.cli_binary
         if binary is not None:
             reason = cli_unavailable_reason(binary)
@@ -441,8 +440,6 @@ class NativeTuiDriver:
                     proc.wait(timeout=8)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-        import shutil
-
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     # ── turns ────────────────────────────────────────────────
