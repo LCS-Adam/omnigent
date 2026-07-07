@@ -152,14 +152,15 @@ class NativeVendor:
         ``external_session_id`` — that id cannot exist until a turn is posted,
         so waiting for it pre-turn deadlocks. Thread-at-launch vendors
         (claude/codex) leave this ``False`` and are gated normally.
-    :param tool_name: The vendor's own tool the tool/policy probes provoke and
-        gate, as it appears on the wire (``event.data.name`` = the vendor's raw
-        PreToolUse ``tool_name``), e.g. ``"Bash"`` for claude, ``"shell"`` for
-        codex. Empty means the tool/policy probes cannot run for this vendor
-        and SKIP. Not derivable from the capability model, so it is an explicit
-        per-vendor fact (see :data:`_NATIVE_TOOL_PROVOCATION`).
-    :param tool_prompt: A prompt that reliably makes the vendor call
-        :attr:`tool_name`. Empty when :attr:`tool_name` is.
+    :param tool_name: The vendor's own shell/terminal tool, e.g. ``"Bash"`` for
+        claude, ``"shell"`` for codex/kiro, ``"run_shell_command"`` for qwen.
+        Used for documentation and as a non-empty gate: empty means the
+        tool/policy probes cannot run for this vendor and SKIP. The deny gates
+        on the tool_call phase (name-agnostic), so this need not be wire-exact.
+        Not derivable from the capability model, so it is an explicit per-vendor
+        fact (see :data:`_NATIVE_TOOL_PROVOCATION`).
+    :param tool_prompt: A prompt that reliably makes the vendor call its shell
+        tool. Empty when :attr:`tool_name` is.
     """
 
     harness: str
@@ -178,23 +179,33 @@ class NativeVendor:
 # are added only once live-verified to behave this way.
 _LAZY_CHAT_HARNESSES: frozenset[str] = frozenset({"cursor-native"})
 
-# The vendor tool the tool/policy probes provoke + gate, keyed by harness:
-# (tool_name as it appears on the wire, a prompt that provokes it). The
-# tool_name must equal the vendor's raw PreToolUse ``tool_name`` (what surfaces
-# as ``event.data.name`` and what the deny policy targets) — claude runs a shell
-# command as ``Bash``, codex as ``shell``. A harmless ``echo`` keeps the ALLOW
-# turn side-effect-free in the ephemeral workspace. A harness absent here has no
-# tool_name, so its tool/policy probes SKIP (never a false UNSUPPORTED).
+# Per-harness tool provocation for the tool/policy probes:
+# ``harness -> (tool_name, prompt)``. The prompt asks the vendor to run a
+# harmless ``echo`` via its own shell/terminal tool (side-effect-free in the
+# ephemeral workspace); the tool call then surfaces as a ``function_call`` item
+# and (with a deny attached) trips the tool_call-phase policy.
+#
+# ``tool_name`` is the vendor's own tool for a shell command, for documentation
+# and as a non-empty gate — a harness absent here (or with an empty entry) has
+# its tool/policy probes SKIP, never a false UNSUPPORTED. The deny policy gates
+# on the tool_call *phase* alone (name-agnostic; see _attach_tool_deny_policy),
+# so ``tool_name`` no longer has to match the vendor's raw hook name exactly.
+# Names sourced from omnigent/policies/builtins/safety.py::ask_on_os_tools and
+# each vendor's native module.
+_SHELL_PROMPT = "Use your shell/terminal tool to run this exact command: echo omnigent-bench-ok"
 _NATIVE_TOOL_PROVOCATION: dict[str, tuple[str, str]] = {
     "claude-native": (
         "Bash",
         "Use the Bash tool to run this exact command: echo omnigent-bench-ok",
     ),
-    "codex-native": (
-        "shell",
-        "Run this exact shell command using your shell tool: echo omnigent-bench-ok",
-    ),
+    "codex-native": ("shell", _SHELL_PROMPT),
     "pi-native": ("Bash", "Use the Bash tool to run this exact command: echo omnigent-bench-ok"),
+    "kiro-native": ("shell", _SHELL_PROMPT),
+    "qwen-native": ("run_shell_command", _SHELL_PROMPT),
+    "goose-native": ("developer__shell", _SHELL_PROMPT),
+    "hermes-native": ("terminal", _SHELL_PROMPT),
+    "antigravity-native": ("run_command", _SHELL_PROMPT),
+    "kimi-native": ("Bash", "Use the Bash tool to run this exact command: echo omnigent-bench-ok"),
 }
 
 
