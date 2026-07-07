@@ -114,6 +114,7 @@ class SqlAlchemyPolicyStore(PolicyStore):
         with self._session() as session:
             stmt = (
                 select(SqlPolicy)
+                .where(SqlPolicy.workspace_id == DEFAULT_WORKSPACE_ID)
                 .where(SqlPolicy.session_id == session_id)
                 .order_by(asc(SqlPolicy.created_at), asc(SqlPolicy.id))
             )
@@ -203,6 +204,7 @@ class SqlAlchemyPolicyStore(PolicyStore):
             existing = (
                 session.execute(
                     select(SqlPolicy)
+                    .where(SqlPolicy.workspace_id == DEFAULT_WORKSPACE_ID)
                     .where(SqlPolicy.scope == POLICY_SCOPE_DEFAULT)
                     .where(SqlPolicy.name == name)
                 )
@@ -232,6 +234,7 @@ class SqlAlchemyPolicyStore(PolicyStore):
         with self._session() as session:
             stmt = (
                 select(SqlPolicy)
+                .where(SqlPolicy.workspace_id == DEFAULT_WORKSPACE_ID)
                 .where(SqlPolicy.scope == POLICY_SCOPE_DEFAULT)
                 .order_by(asc(SqlPolicy.created_at), asc(SqlPolicy.id))
             )
@@ -262,6 +265,7 @@ class SqlAlchemyPolicyStore(PolicyStore):
                 conflict = (
                     session.execute(
                         select(SqlPolicy)
+                        .where(SqlPolicy.workspace_id == DEFAULT_WORKSPACE_ID)
                         .where(SqlPolicy.scope == POLICY_SCOPE_DEFAULT)
                         .where(SqlPolicy.name == name)
                         .where(SqlPolicy.id != policy_id)

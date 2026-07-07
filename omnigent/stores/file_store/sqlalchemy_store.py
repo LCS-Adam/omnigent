@@ -129,7 +129,7 @@ class SqlAlchemyFileStore(FileStore):
         with self._session() as session:
             is_desc = order == "desc"
             sort_fn = desc if is_desc else asc
-            stmt = select(SqlFile)
+            stmt = select(SqlFile).where(SqlFile.workspace_id == DEFAULT_WORKSPACE_ID)
             if session_id is not None:
                 if include_unscoped:
                     stmt = stmt.where(
@@ -138,12 +138,26 @@ class SqlAlchemyFileStore(FileStore):
                 else:
                     stmt = stmt.where(SqlFile.session_id == session_id)
             if after:
-                sub = select(SqlFile.created_at).where(SqlFile.id == after).scalar_subquery()
+                sub = (
+                    select(SqlFile.created_at)
+                    .where(
+                        SqlFile.workspace_id == DEFAULT_WORKSPACE_ID,
+                        SqlFile.id == after,
+                    )
+                    .scalar_subquery()
+                )
                 ts_cmp = SqlFile.created_at < sub if is_desc else SqlFile.created_at > sub
                 id_cmp = SqlFile.id < after if is_desc else SqlFile.id > after
                 stmt = stmt.where(or_(ts_cmp, and_(SqlFile.created_at == sub, id_cmp)))
             if before:
-                sub = select(SqlFile.created_at).where(SqlFile.id == before).scalar_subquery()
+                sub = (
+                    select(SqlFile.created_at)
+                    .where(
+                        SqlFile.workspace_id == DEFAULT_WORKSPACE_ID,
+                        SqlFile.id == before,
+                    )
+                    .scalar_subquery()
+                )
                 ts_cmp = SqlFile.created_at > sub if is_desc else SqlFile.created_at < sub
                 id_cmp = SqlFile.id > before if is_desc else SqlFile.id < before
                 stmt = stmt.where(or_(ts_cmp, and_(SqlFile.created_at == sub, id_cmp)))
@@ -196,6 +210,7 @@ class SqlAlchemyFileStore(FileStore):
         """
         with self._session() as session:
             stmt = select(SqlFile).where(
+                SqlFile.workspace_id == DEFAULT_WORKSPACE_ID,
                 SqlFile.session_id == session_id,
             )
             rows = list(session.execute(stmt).scalars().all())

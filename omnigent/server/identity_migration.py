@@ -101,7 +101,11 @@ def build_domain_mapping(engine: Engine, domain: str) -> dict[str, str]:
     domain = domain.lstrip("@").strip().lower()
     mapping: dict[str, str] = {}
     with Session(engine) as session:
-        ids = session.execute(select(SqlUser.id)).scalars().all()
+        ids = (
+            session.execute(select(SqlUser.id).where(SqlUser.workspace_id == DEFAULT_WORKSPACE_ID))
+            .scalars()
+            .all()
+        )
     for uid in ids:
         if "@" in uid or uid in _RESERVED_USERS:
             continue
@@ -178,7 +182,10 @@ def remap_identities(
             # merges to the higher level instead of violating the PK.
             old_grants = (
                 session.execute(
-                    select(SqlSessionPermission).where(SqlSessionPermission.user_id == old_id)
+                    select(SqlSessionPermission).where(
+                        SqlSessionPermission.workspace_id == DEFAULT_WORKSPACE_ID,
+                        SqlSessionPermission.user_id == old_id,
+                    )
                 )
                 .scalars()
                 .all()
@@ -203,7 +210,9 @@ def remap_identities(
                 (SqlPolicy, SqlPolicy.created_by),
             ):
                 result = session.execute(
-                    update(model).where(column == old_id).values(created_by=new_id)
+                    update(model)
+                    .where(model.workspace_id == DEFAULT_WORKSPACE_ID, column == old_id)
+                    .values(created_by=new_id)
                 )
                 report._bump(model.__tablename__, result.rowcount or 0)
 
@@ -211,7 +220,12 @@ def remap_identities(
             for column_name in ("user_id", "created_by"):
                 column = getattr(SqlAccountToken, column_name)
                 result = session.execute(
-                    update(SqlAccountToken).where(column == old_id).values(**{column_name: new_id})
+                    update(SqlAccountToken)
+                    .where(
+                        SqlAccountToken.workspace_id == DEFAULT_WORKSPACE_ID,
+                        column == old_id,
+                    )
+                    .values(**{column_name: new_id})
                 )
                 report._bump(SqlAccountToken.__tablename__, result.rowcount or 0)
 
@@ -220,7 +234,14 @@ def remap_identities(
             # per-row. Rare in OSS (hosts are a Databricks-connect
             # feature), but correctness over assumption.
             old_hosts = (
-                session.execute(select(SqlHost).where(SqlHost.owner == old_id)).scalars().all()
+                session.execute(
+                    select(SqlHost).where(
+                        SqlHost.workspace_id == DEFAULT_WORKSPACE_ID,
+                        SqlHost.owner == old_id,
+                    )
+                )
+                .scalars()
+                .all()
             )
             for host in old_hosts:
                 clash = session.get(SqlHost, (DEFAULT_WORKSPACE_ID, new_id, host.name))

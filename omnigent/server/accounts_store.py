@@ -174,7 +174,14 @@ class SqlAlchemyAccountStore:
         :param is_admin: The flag value to set.
         """
         with self._session() as session:
-            session.execute(update(SqlUser).where(SqlUser.id == user_id).values(is_admin=is_admin))
+            session.execute(
+                update(SqlUser)
+                .where(
+                    SqlUser.workspace_id == DEFAULT_WORKSPACE_ID,
+                    SqlUser.id == user_id,
+                )
+                .values(is_admin=is_admin)
+            )
 
     def list_users(self) -> list[Account]:
         """Return all users for the admin members page.
@@ -196,7 +203,13 @@ class SqlAlchemyAccountStore:
         Result is unordered; UI sorts.
         """
         with self._session() as session:
-            rows = session.execute(select(SqlUser)).scalars().all()
+            rows = (
+                session.execute(
+                    select(SqlUser).where(SqlUser.workspace_id == DEFAULT_WORKSPACE_ID)
+                )
+                .scalars()
+                .all()
+            )
             return [_to_account(r) for r in rows if r.id not in _HIDDEN_LIST_USERS]
 
     def delete_user(self, user_id: str) -> bool:
@@ -209,9 +222,17 @@ class SqlAlchemyAccountStore:
         """
         with self._session() as session:
             session.execute(
-                delete(SqlSessionPermission).where(SqlSessionPermission.user_id == user_id)
+                delete(SqlSessionPermission).where(
+                    SqlSessionPermission.workspace_id == DEFAULT_WORKSPACE_ID,
+                    SqlSessionPermission.user_id == user_id,
+                )
             )
-            result = session.execute(delete(SqlUser).where(SqlUser.id == user_id))
+            result = session.execute(
+                delete(SqlUser).where(
+                    SqlUser.workspace_id == DEFAULT_WORKSPACE_ID,
+                    SqlUser.id == user_id,
+                )
+            )
             return result.rowcount > 0
 
     def get_password_hash(self, user_id: str) -> str | None:
@@ -235,7 +256,12 @@ class SqlAlchemyAccountStore:
         """
         with self._session() as session:
             session.execute(
-                update(SqlUser).where(SqlUser.id == user_id).values(password_hash=password_hash)
+                update(SqlUser)
+                .where(
+                    SqlUser.workspace_id == DEFAULT_WORKSPACE_ID,
+                    SqlUser.id == user_id,
+                )
+                .values(password_hash=password_hash)
             )
 
     def mark_logged_in(self, user_id: str, when_epoch_seconds: int) -> None:
@@ -247,7 +273,10 @@ class SqlAlchemyAccountStore:
         with self._session() as session:
             session.execute(
                 update(SqlUser)
-                .where(SqlUser.id == user_id)
+                .where(
+                    SqlUser.workspace_id == DEFAULT_WORKSPACE_ID,
+                    SqlUser.id == user_id,
+                )
                 .values(last_login_at=when_epoch_seconds)
             )
 
@@ -317,6 +346,7 @@ class SqlAlchemyAccountStore:
                 update(SqlAccountToken)
                 .where(
                     and_(
+                        SqlAccountToken.workspace_id == DEFAULT_WORKSPACE_ID,
                         SqlAccountToken.id == token_id,
                         SqlAccountToken.kind == kind,
                         SqlAccountToken.redeemed_at.is_(None),
@@ -342,7 +372,10 @@ class SqlAlchemyAccountStore:
         """
         with self._session() as session:
             result = session.execute(
-                delete(SqlAccountToken).where(SqlAccountToken.expires_at <= now_epoch_seconds)
+                delete(SqlAccountToken).where(
+                    SqlAccountToken.workspace_id == DEFAULT_WORKSPACE_ID,
+                    SqlAccountToken.expires_at <= now_epoch_seconds,
+                )
             )
             return result.rowcount
 
@@ -378,6 +411,7 @@ class SqlAlchemyAccountStore:
                 update(SqlAccountToken)
                 .where(
                     and_(
+                        SqlAccountToken.workspace_id == DEFAULT_WORKSPACE_ID,
                         SqlAccountToken.id == token_id,
                         SqlAccountToken.kind == "invite",
                         SqlAccountToken.redeemed_at.is_(None),
@@ -405,6 +439,7 @@ class SqlAlchemyAccountStore:
                 select(
                     exists().where(
                         and_(
+                            SqlAccountToken.workspace_id == DEFAULT_WORKSPACE_ID,
                             SqlAccountToken.kind == "invite",
                             SqlAccountToken.user_id == email,
                             SqlAccountToken.redeemed_at.is_not(None),

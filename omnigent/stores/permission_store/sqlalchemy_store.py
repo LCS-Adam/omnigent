@@ -116,6 +116,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
         with self._session() as session:
             result = session.execute(
                 delete(SqlSessionPermission).where(
+                    SqlSessionPermission.workspace_id == DEFAULT_WORKSPACE_ID,
                     SqlSessionPermission.user_id == user_id,
                     SqlSessionPermission.conversation_id == conversation_id,
                 )
@@ -158,6 +159,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
             rows = (
                 session.execute(
                     select(SqlSessionPermission).where(
+                        SqlSessionPermission.workspace_id == DEFAULT_WORKSPACE_ID,
                         SqlSessionPermission.user_id == from_user_id,
                     )
                 )
@@ -181,6 +183,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
                 session.execute(
                     update(SqlSessionPermission)
                     .where(
+                        SqlSessionPermission.workspace_id == DEFAULT_WORKSPACE_ID,
                         SqlSessionPermission.user_id == from_user_id,
                         SqlSessionPermission.conversation_id == conversation_id,
                     )
@@ -195,6 +198,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
             rows = (
                 session.execute(
                     select(SqlSessionPermission).where(
+                        SqlSessionPermission.workspace_id == DEFAULT_WORKSPACE_ID,
                         SqlSessionPermission.conversation_id == conversation_id,
                     )
                 )
@@ -214,7 +218,8 @@ class SqlAlchemyPermissionStore(PermissionStore):
                 _to_entity(r)
                 for r in session.execute(
                     select(SqlSessionPermission).where(
-                        SqlSessionPermission.conversation_id.in_(conversation_ids)
+                        SqlSessionPermission.workspace_id == DEFAULT_WORKSPACE_ID,
+                        SqlSessionPermission.conversation_id.in_(conversation_ids),
                     )
                 )
                 .scalars()
@@ -231,6 +236,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
             rows = (
                 session.execute(
                     select(SqlSessionPermission).where(
+                        SqlSessionPermission.workspace_id == DEFAULT_WORKSPACE_ID,
                         SqlSessionPermission.user_id == user_id,
                     )
                 )
@@ -261,7 +267,13 @@ class SqlAlchemyPermissionStore(PermissionStore):
     def list_users(self) -> list[Account]:
         """List every real user row. See base class for contract."""
         with self._session() as session:
-            rows = session.execute(select(SqlUser)).scalars().all()
+            rows = (
+                session.execute(
+                    select(SqlUser).where(SqlUser.workspace_id == DEFAULT_WORKSPACE_ID)
+                )
+                .scalars()
+                .all()
+            )
             return [_to_account(r) for r in rows if r.id not in _HIDDEN_LIST_USERS]
 
     def is_admin(self, user_id: str) -> bool:
@@ -273,7 +285,14 @@ class SqlAlchemyPermissionStore(PermissionStore):
     def set_admin(self, user_id: str, is_admin: bool) -> None:
         """Set the admin flag on an existing user. See base class for contract."""
         with self._session() as session:
-            session.execute(update(SqlUser).where(SqlUser.id == user_id).values(is_admin=is_admin))
+            session.execute(
+                update(SqlUser)
+                .where(
+                    SqlUser.workspace_id == DEFAULT_WORKSPACE_ID,
+                    SqlUser.id == user_id,
+                )
+                .values(is_admin=is_admin)
+            )
 
     def check_access(
         self,
@@ -352,6 +371,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
             return session.execute(
                 select(
                     exists().where(
+                        SqlSessionPermission.workspace_id == DEFAULT_WORKSPACE_ID,
                         SqlSessionPermission.conversation_id == conversation_id,
                     )
                 )

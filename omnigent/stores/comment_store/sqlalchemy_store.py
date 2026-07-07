@@ -102,7 +102,10 @@ class SqlAlchemyCommentStore(CommentStore):
         path: str | None = None,
     ) -> list[Comment]:
         """Return comments for a conversation. See base class for contract."""
-        stmt = select(SqlComment).where(SqlComment.conversation_id == conversation_id)
+        stmt = select(SqlComment).where(
+            SqlComment.workspace_id == DEFAULT_WORKSPACE_ID,
+            SqlComment.conversation_id == conversation_id,
+        )
         if path is not None:
             stmt = stmt.where(SqlComment.path == path)
         stmt = stmt.order_by(SqlComment.created_at)
@@ -153,7 +156,10 @@ class SqlAlchemyCommentStore(CommentStore):
                 func.count(SqlComment.id),
                 func.max(SqlComment.updated_at),
             )
-            .where(SqlComment.conversation_id.in_(conversation_ids))
+            .where(
+                SqlComment.workspace_id == DEFAULT_WORKSPACE_ID,
+                SqlComment.conversation_id.in_(conversation_ids),
+            )
             .group_by(SqlComment.conversation_id)
         )
         with self._session() as session:
@@ -164,6 +170,9 @@ class SqlAlchemyCommentStore(CommentStore):
 
     def remove_conversation(self, conversation_id: str) -> None:
         """Delete all comments for a conversation. See base class for contract."""
-        stmt = delete(SqlComment).where(SqlComment.conversation_id == conversation_id)
+        stmt = delete(SqlComment).where(
+            SqlComment.workspace_id == DEFAULT_WORKSPACE_ID,
+            SqlComment.conversation_id == conversation_id,
+        )
         with self._session() as session:
             session.execute(stmt)
