@@ -49,6 +49,7 @@ already logged in.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import signal
@@ -109,6 +110,17 @@ _OUTPUT_DONE_EVENT = "response.output_item.done"
 _IN_PROGRESS_EVENT = "response.in_progress"
 _FAILED_EVENT = "response.failed"
 _INTERRUPTED_EVENT = "session.interrupted"
+# Published by the server when a native tool-call policy DENY is enforced (see
+# sessions.py::_publish_policy_denied). The positive signal the deny probe keys
+# on — a native deny is decided in the hook and otherwise leaves no stream trace.
+_POLICY_DENIED_EVENT = "response.policy_denied"
+
+# The registered CEL policy handler + a bench-owned deny reason. The deny probe
+# attaches a session policy that DENYs the provoked tool at the tool_call phase.
+_CEL_POLICY_HANDLER = "omnigent.policies.builtins.cel.cel_policy"
+_NATIVE_DENY_REASON = "bench-native-tool-deny"
+# How long to wait for the tool call / deny signal on a tool turn.
+_TOOL_TURN_TIMEOUT_S = 180.0
 
 # How long to let a turn run after it reports in-progress before firing the
 # interrupt, so the cancel lands mid-turn rather than racing turn setup.
@@ -140,6 +152,14 @@ class NativeVendor:
         ``external_session_id`` — that id cannot exist until a turn is posted,
         so waiting for it pre-turn deadlocks. Thread-at-launch vendors
         (claude/codex) leave this ``False`` and are gated normally.
+    :param tool_name: The vendor's own tool the tool/policy probes provoke and
+        gate, as it appears on the wire (``event.data.name`` = the vendor's raw
+        PreToolUse ``tool_name``), e.g. ``"Bash"`` for claude, ``"shell"`` for
+        codex. Empty means the tool/policy probes cannot run for this vendor
+        and SKIP. Not derivable from the capability model, so it is an explicit
+        per-vendor fact (see :data:`_NATIVE_TOOL_PROVOCATION`).
+    :param tool_prompt: A prompt that reliably makes the vendor call
+        :attr:`tool_name`. Empty when :attr:`tool_name` is.
     """
 
     harness: str
@@ -147,6 +167,8 @@ class NativeVendor:
     terminal_name: str
     own_auth: bool = False
     lazy_chat: bool = False
+    tool_name: str = ""
+    tool_prompt: str = ""
 
 
 # Vendors whose external_session_id is created by the first message, not at TUI
@@ -155,6 +177,25 @@ class NativeVendor:
 # (its forwarder discovers the chat store written on the first message); others
 # are added only once live-verified to behave this way.
 _LAZY_CHAT_HARNESSES: frozenset[str] = frozenset({"cursor-native"})
+
+# The vendor tool the tool/policy probes provoke + gate, keyed by harness:
+# (tool_name as it appears on the wire, a prompt that provokes it). The
+# tool_name must equal the vendor's raw PreToolUse ``tool_name`` (what surfaces
+# as ``event.data.name`` and what the deny policy targets) — claude runs a shell
+# command as ``Bash``, codex as ``shell``. A harmless ``echo`` keeps the ALLOW
+# turn side-effect-free in the ephemeral workspace. A harness absent here has no
+# tool_name, so its tool/policy probes SKIP (never a false UNSUPPORTED).
+_NATIVE_TOOL_PROVOCATION: dict[str, tuple[str, str]] = {
+    "claude-native": (
+        "Bash",
+        "Use the Bash tool to run this exact command: echo omnigent-bench-ok",
+    ),
+    "codex-native": (
+        "shell",
+        "Run this exact shell command using your shell tool: echo omnigent-bench-ok",
+    ),
+    "pi-native": ("Bash", "Use the Bash tool to run this exact command: echo omnigent-bench-ok"),
+}
 
 
 def native_vendor(harness: str) -> NativeVendor | None:
@@ -174,12 +215,15 @@ def native_vendor(harness: str) -> NativeVendor | None:
     # vendor CLI name), which holds for every in-repo native. A community
     # plugin whose registered terminal/agent name diverges would need an
     # override map here, mirroring the manifest's _NATIVE_CLI_BINARY.
+    tool_name, tool_prompt = _NATIVE_TOOL_PROVOCATION.get(harness, ("", ""))
     return NativeVendor(
         harness=harness,
         agent_name=f"{harness}-ui",
         terminal_name=harness.removesuffix("-native"),
         own_auth=caps.auth is not AuthModel.OMNIGENT_CREDENTIAL,
         lazy_chat=harness in _LAZY_CHAT_HARNESSES,
+        tool_name=tool_name,
+        tool_prompt=tool_prompt,
     )
 
 
@@ -205,6 +249,10 @@ class NativeTuiDriver:
         self._session_id: str | None = None
         self._base_url = ""
         self._tmp = Path("/tmp") / f"omni-bench-nt-{uuid.uuid4().hex[:8]}"
+        # Set from the terminal-ensure response when native policy enforcement
+        # is inactive (fail-open: codex too old / hook untrusted). The deny
+        # probe reads this to SKIP rather than report a false UNSUPPORTED.
+        self._policy_hook_disabled_reason: str | None = None
 
     @staticmethod
     def unavailable(profile: BenchProfile, *, databricks_profile: str | None) -> str | None:
@@ -257,15 +305,7 @@ class NativeTuiDriver:
         return await asyncio.to_thread(self._drive_turn, _STREAM_PROMPT, count_deltas=True)
 
     async def run_tool_turn(self, *, deny: bool) -> TurnResult:
-        # Native tool calls are the vendor's own tools (Bash/Read/...), not a
-        # server-dispatched builtin the bench can force, and a native deny
-        # surfaces as a vendor permission decision rather than a
-        # function_call_output. Wiring that observation is the next
-        # increment; today the skeleton reports it unmeasured so the probe
-        # records a capability-neutral skip rather than a false verdict.
-        result = TurnResult()
-        result.error = "native tool/policy observation not yet wired (skeleton)"
-        return result
+        return await asyncio.to_thread(self._drive_tool_turn, deny=deny)
 
     async def run_interrupt_turn(self) -> TurnResult:
         return await asyncio.to_thread(self._drive_interrupt_turn)
@@ -350,6 +390,13 @@ class NativeTuiDriver:
             timeout=90.0,
         )
         ensure.raise_for_status()
+        # The terminal-ensure success body carries a one-shot
+        # ``policy_hook_disabled_reason`` when native tool-call policy
+        # enforcement is inactive (fail-open: codex too old / hook untrusted).
+        # Record it so the deny probe SKIPs rather than reading an unenforced
+        # deny as UNSUPPORTED.
+        with contextlib.suppress(Exception):
+            self._policy_hook_disabled_reason = ensure.json().get("policy_hook_disabled_reason")
         # A lazy-chat vendor (cursor) does not create its external_session_id
         # until the first message lands, so it cannot be gated on here — waiting
         # pre-turn would deadlock. The terminal is ensured; the first probe turn
@@ -532,6 +579,153 @@ class NativeTuiDriver:
             result.timed_out = True
         return result
 
+    def _drive_tool_turn(self, *, deny: bool) -> TurnResult:
+        """Provoke the vendor's own tool, observe the call (and, with *deny*, the block).
+
+        The tool call surfaces as a persisted ``function_call`` item (the vendor
+        bridge mirrors ``tool_use`` into one), so ``result.tool_calls`` is filled
+        by scanning the session items past a pre-turn baseline. With *deny*, a
+        tool_call-phase DENY is attached to the session first (a CEL policy
+        targeting the provoked tool); the block is decided in the vendor hook and
+        surfaces on the stream as ``response.policy_denied`` — the positive signal
+        that sets ``result.tool_call_denied``.
+
+        Returns a capability-neutral SKIP (``error`` set, no verdict fields) when
+        the vendor has no known tool to provoke, or when *deny* is requested but
+        native policy enforcement is inactive (fail-open) — so the probes never
+        read an environment gap as UNSUPPORTED.
+        """
+        assert self._client is not None and self._vendor is not None
+        result = TurnResult()
+        if not self._vendor.tool_name:
+            result.error = f"no tool-provocation mapping for {self._vendor.harness!r}; skipped"
+            return result
+        if deny:
+            if self._policy_hook_disabled_reason:
+                result.error = (
+                    f"native policy enforcement inactive ({self._policy_hook_disabled_reason}); "
+                    "cannot exercise tool-call DENY"
+                )
+                return result
+            attached = self._attach_tool_deny_policy(self._vendor.tool_name)
+            if attached is not None:
+                result.error = attached  # e.g. CEL handler unavailable -> SKIP
+                return result
+
+        events: list[str] = []
+        ready = threading.Event()
+
+        def _read() -> None:
+            assert self._client is not None
+            try:
+                with self._client.stream(
+                    "GET",
+                    f"/v1/sessions/{self._session_id}/stream",
+                    timeout=_TOOL_TURN_TIMEOUT_S,
+                ) as resp:
+                    ready.set()
+                    for line in resp.iter_lines():
+                        if not line.startswith("event:"):
+                            continue
+                        etype = line[len("event:") :].strip()
+                        events.append(etype)
+                        if etype == _POLICY_DENIED_EVENT:
+                            result.tool_call_denied = True
+                        # Stop once output is done/failed/interrupted. On a deny
+                        # the tool never runs, so the turn still ends normally.
+                        if etype in _READER_TERMINAL:
+                            return
+            except httpx.HTTPError as exc:
+                result.error = repr(exc)
+
+        baseline = self._tool_item_count()
+        reader = threading.Thread(target=_read)
+        reader.start()
+        ready.wait(timeout=10.0)  # subscribe before posting so no event is lost
+        self._post_message(self._vendor.tool_prompt)
+        self._poll_new_tool_calls(baseline, result)
+        reader.join(timeout=10.0)
+
+        # Turn end: output finished (or, on a deny, the blocked tool left the
+        # turn to complete without producing the tool item).
+        result.completed = _OUTPUT_DONE_EVENT in events or bool(result.tool_calls)
+        return result
+
+    def _attach_tool_deny_policy(self, tool_name: str) -> str | None:
+        """Attach a session policy that DENYs *tool_name* at the tool_call phase.
+
+        Uses the registered CEL handler via ``POST /v1/sessions/{id}/policies``.
+        Returns ``None`` on success (200/201/409); a skip-reason string when the
+        handler is unavailable (e.g. ``cel_expr_python`` not installed, so the
+        server rejects it as unregistered) — an environment gap, not a
+        capability gap.
+        """
+        assert self._client is not None
+        # Ternary so the expression returns a map (a bare `&&` returns a bool,
+        # which the CEL policy treats as abstain -> ALLOW).
+        expression = (
+            f'event.type == "tool_call" && event.data.name == "{tool_name}" '
+            f'? {{"result": "DENY", "reason": "{_NATIVE_DENY_REASON}"}} '
+            f': {{"result": "ALLOW"}}'
+        )
+        resp = self._client.post(
+            f"/v1/sessions/{self._session_id}/policies",
+            json={
+                "name": "bench_tool_deny",
+                "type": "python",
+                "handler": _CEL_POLICY_HANDLER,
+                "factory_params": {"expression": expression, "reason": _NATIVE_DENY_REASON},
+            },
+            timeout=30.0,
+        )
+        if resp.status_code in (200, 201, 409):  # 409: already attached (reused session)
+            return None
+        return f"could not attach tool-call deny policy (status {resp.status_code}); skipped"
+
+    def _tool_item_count(self) -> int:
+        """Current number of function_call items in the session (pre-turn baseline)."""
+        assert self._client is not None
+        resp = self._client.get(f"/v1/sessions/{self._session_id}/items", params={"order": "asc"})
+        if resp.status_code != 200:
+            return 0
+        return sum(1 for it in resp.json().get("data", []) if _item_type(it) == "function_call")
+
+    def _poll_new_tool_calls(
+        self, baseline: int, result: TurnResult, timeout: float = _TOOL_TURN_TIMEOUT_S
+    ) -> None:
+        """Poll session items for NEW function_call items; append them to *result*.
+
+        Scoped past *baseline* so a reused session's prior tool calls don't
+        re-count. Stops as soon as at least one new call is seen (or on a deny,
+        as soon as the deny signal already landed on the stream).
+        """
+        assert self._client is not None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            resp = self._client.get(
+                f"/v1/sessions/{self._session_id}/items", params={"order": "asc"}
+            )
+            if resp.status_code == 200:
+                calls = [
+                    it for it in resp.json().get("data", []) if _item_type(it) == "function_call"
+                ]
+                if len(calls) > baseline:
+                    for raw in calls[baseline:]:
+                        data = raw.get("data", raw)
+                        result.tool_calls.append(
+                            {
+                                "call_id": data.get("call_id"),
+                                "name": data.get("name"),
+                                "arguments": data.get("arguments"),
+                            }
+                        )
+                    return
+            # On a deny the tool never runs, so no new function_call item will
+            # appear — stop waiting once the stream already reported the block.
+            if result.tool_call_denied:
+                return
+            time.sleep(_POLL_INTERVAL_S)
+
     def _assistant_item_count(self) -> int:
         """Current number of assistant items in the session (pre-turn baseline)."""
         assert self._client is not None
@@ -641,3 +835,14 @@ def _assistant_text(item: dict[str, Any]) -> str:
         for block in content
         if isinstance(block, dict) and isinstance(block.get("text"), str)
     )
+
+
+def _item_type(item: dict[str, Any]) -> str | None:
+    """The item's type, tolerant of a top-level or nested-``data`` shape.
+
+    A native ``function_call`` item may carry ``type`` at the top level or under
+    ``data`` depending on the items-endpoint serialization, so check both (mirrors
+    full_server_driver._scan_tool_items).
+    """
+    data = item.get("data", item)
+    return item.get("type") or (data.get("type") if isinstance(data, dict) else None)
