@@ -1860,7 +1860,7 @@ def test_overview_truncates_long_status_for_narrow_terminal(isolated_config, mon
         ("10", "_manage_copilot_harness"),
         ("11", "_manage_kiro_harness"),
         ("12", "_manage_kimi_harness"),
-        ("13", "_manage_acp_harness"),
+        ("13", "_add_acp_agent"),
     ],
 )
 def test_overview_dispatches_to_correct_manager(

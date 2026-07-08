@@ -10150,10 +10150,12 @@ def _print_acp_examples() -> None:
     )
 
 
-def _add_acp_agent() -> str | None:
+def _add_acp_agent() -> None:
     """Prompt for a new ACP agent and append it to the ``acp:`` config block.
 
-    :returns: A status line for the menu, or ``None`` when nothing was added.
+    Reached straight from the "Add custom ACP agent" overview row (no
+    intermediate menu). Prints the paste-ready examples first, then prompts for
+    name / command / optional model.
     """
     from omnigent.onboarding.acp_auth import (
         AcpAgentEntry,
@@ -10161,82 +10163,52 @@ def _add_acp_agent() -> str | None:
         acp_agents_settings,
         slugify,
     )
-    from omnigent.onboarding.interactive import prompt_text
+    from omnigent.onboarding.interactive import console, prompt_text
 
+    _print_acp_examples()
     name = prompt_text("Agent name (e.g. Gemini CLI)").strip()
     if not name:
-        return "No name entered"
+        console.print("  [yellow]No name entered — nothing added.[/yellow]")
+        return
     command = prompt_text("Command to launch (e.g. gemini --experimental-acp)").strip()
     if not command:
-        return "No command entered"
+        console.print("  [yellow]No command entered — nothing added.[/yellow]")
+        return
     model = (prompt_text("Model (optional — Enter to skip)", default="") or "").strip() or None
 
     entries = list(acp_agents())
     entries.append(AcpAgentEntry(slug=slugify(name), name=name, command=command, model=model))
     _save_global_config(acp_agents_settings(entries))
-    return f"✓ Added {name}"
+    console.print(f"  ✓ Added {name}")
 
 
-def _remove_acp_agent() -> str | None:
-    """Pick a configured ACP agent to drop from the ``acp:`` config block.
+def _manage_acp_agent(slug: str) -> None:
+    """Per-agent drill-in for one configured ACP agent: remove it.
 
-    :returns: A status line for the menu, or ``None`` when cancelled.
+    Reached by selecting the agent's own row in the configure-harnesses overview.
+    A single-shot menu (Remove / Back) — Omnigent stores no credential, so there
+    is nothing else to manage per agent yet.
+
+    :param slug: The agent's slug (see :func:`omnigent.onboarding.acp_auth.slugify`).
     """
     from omnigent.onboarding.acp_auth import acp_agents, acp_agents_settings
-    from omnigent.onboarding.interactive import select
+    from omnigent.onboarding.interactive import console, select
 
-    entries = list(acp_agents())
-    if not entries:
-        return "No agents to remove"
-    labels = [f"{e.name}  ({e.command})" for e in entries] + ["← Cancel"]
-    idx = select("Remove which ACP agent?", labels, clear_on_exit=True)
-    if idx < 0 or idx >= len(entries):
-        return None
-    removed = entries.pop(idx)
-    _save_global_config(acp_agents_settings(entries))
-    return f"✓ Removed {removed.name}"
-
-
-def _manage_acp_harness() -> None:
-    """Run the level-2 loop for the generic ACP harness: manage named agents.
-
-    The ``acp`` harness drives any user-configured ACP-agent command. Each named
-    agent lives in the ``acp:`` block of ``~/.omnigent/config.yaml`` and surfaces
-    as its own row (``acp:<slug>``) in the agent-harness picker. Omnigent stores
-    no credential — the user logs into each agent via its own CLI — so this
-    drill-in just adds / lists / removes commands.
-
-    :returns: None. Side effects: reads/writes the ``acp:`` config block.
-    """
-    from omnigent.onboarding.acp_auth import acp_agents
-    from omnigent.onboarding.interactive import select
-
-    status: str | None = None
-    while True:
-        agents = acp_agents()
-        if agents:
-            names = ", ".join(a.name for a in agents)
-            header = f"Custom ACP agents — {len(agents)} configured: {names}"
-        else:
-            header = "Custom ACP agents — none configured yet"
-        rows: list[_HarnessMenuRow] = [_HarnessMenuRow("Add an ACP agent", action="add")]
-        if agents:
-            rows.append(_HarnessMenuRow("Remove an agent", action="remove"))
-        rows.append(_HarnessMenuRow("Show examples", action="help"))
-        rows.append(_HarnessMenuRow("← Back", action="back"))
-        idx = select(header, [r.label for r in rows], clear_on_exit=True, status=status)
-        if idx < 0:  # Esc / q
-            return
-        action = rows[idx].action
-        if action == "back":
-            return
-        if action == "add":
-            status = _add_acp_agent()
-        elif action == "remove":
-            status = _remove_acp_agent()
-        elif action == "help":
-            _print_acp_examples()
-            status = None
+    agents = list(acp_agents())
+    agent = next((a for a in agents if a.slug == slug), None)
+    if agent is None:
+        return
+    suffix = f"  ·  {agent.model}" if agent.model else ""
+    header = f"{agent.name} — {agent.command}{suffix}"
+    rows: list[_HarnessMenuRow] = [
+        _HarnessMenuRow("Remove this agent", action="remove"),
+        _HarnessMenuRow("← Back", action="back"),
+    ]
+    idx = select(header, [r.label for r in rows], clear_on_exit=True)
+    if idx < 0 or rows[idx].action == "back":
+        return
+    _save_global_config(acp_agents_settings([a for a in agents if a.slug != slug]))
+    console.print(f"  ✓ Removed {agent.name}")
 
 
 def _manage_hermes_harness() -> None:
@@ -11256,18 +11228,26 @@ def _run_configure_harnesses_interactive() -> None:
     # / ``kimi provider add`` → ~/.kimi/config.toml), so it dispatches to its
     # own drill-in rather than ``_manage_harness_providers``.
     _KIMI = "\x00kimi"
-    # Sentinel marking the Custom ACP agent row — the generic ACP harness that
-    # drives any user-configured agent command. Not a provider family (each agent
-    # owns its own auth), so it dispatches to its own add/list/remove drill-in.
-    _ACP = "\x00acp"
+    # Sentinels for the generic-ACP rows. Each configured agent gets its own row
+    # (``_ACP_AGENT_PREFIX + slug`` → per-agent remove drill-in); a single
+    # ``_ACP_ADD`` row jumps straight into the add flow. Not a provider family —
+    # each ACP agent owns its own auth.
+    _ACP_ADD = "\x00acp-add"
+    _ACP_AGENT_PREFIX = "\x00acp-agent:"
     families = [ANTHROPIC_FAMILY, OPENAI_FAMILY, PI_SURFACE]
 
     # Status glyph + Rich color per readiness kind: "ready" is a configured,
     # launchable harness (green ✓); "missing" is an absent CLI/SDK (red ✗);
     # "warn" is installed-but-unconfigured (yellow ✗ — present, not usable
-    # yet). The glyph leads the status, which sits in a left-aligned column
-    # right of the names, so every ✓/✗ lines up in a single column.
-    status_styles = {"ready": ("✓", "green"), "missing": ("✗", "red"), "warn": ("✗", "yellow")}
+    # yet); "action" is a do-something row (e.g. Add) with no status glyph. The
+    # glyph leads the status, which sits in a left-aligned column right of the
+    # names, so every ✓/✗ lines up in a single column.
+    status_styles = {
+        "ready": ("✓", "green"),
+        "missing": ("✗", "red"),
+        "warn": ("✗", "yellow"),
+        "action": ("", "cyan"),
+    }
 
     def _install_hint(command: str) -> str:
         # Selection-only tooltip. The command is escaped so a bracketed extra
@@ -11530,27 +11510,32 @@ def _run_configure_harnesses_interactive() -> None:
             rows.append((_KIMI, "Kimi Code", "Not installed", "missing", _install_hint(kimi_hint)))
 
         # Custom ACP agents — the generic `acp` harness driving any user-configured
-        # ACP-agent command. Each configured agent gets its own overview row so it
-        # sits alongside the built-in harnesses (not buried in a drill-in), plus an
-        # "Add" row. Not gated on a binary — each agent owns its own install. All
-        # route to the shared ACP manager (add / edit / remove).
+        # ACP-agent command. Each configured agent gets its own overview row
+        # (select → per-agent remove drill-in) so it sits alongside the built-in
+        # harnesses, followed by an "Add" row that jumps straight into the add
+        # flow. Not gated on a binary — each agent owns its own install.
         from omnigent.onboarding.acp_auth import acp_config_summary
 
         acp_summary = acp_config_summary()
         for agent in acp_summary.agents:
-            rows.append((_ACP, agent.name, f"ACP · {agent.command}", "ready", ""))
-        if acp_summary.configured:
-            rows.append((_ACP, "Add custom ACP agent", "", "warn", "Add another ACP agent."))
-        else:
             rows.append(
                 (
-                    _ACP,
-                    "Custom ACP agent",
-                    "None configured",
-                    "warn",
-                    "Add any ACP agent (gemini, qwen, goose, …).",
+                    _ACP_AGENT_PREFIX + agent.slug,
+                    agent.name,
+                    f"ACP · {agent.command}",
+                    "ready",
+                    "Select to remove this ACP agent.",
                 )
             )
+        rows.append(
+            (
+                _ACP_ADD,
+                "Add custom ACP agent" if acp_summary.configured else "Custom ACP agent",
+                "" if acp_summary.configured else "None configured",
+                "action",
+                "Add an ACP agent (gemini, qwen, goose, …).",
+            )
+        )
         return rows
 
     while True:
@@ -11609,8 +11594,10 @@ def _run_configure_harnesses_interactive() -> None:
             _manage_opencode_harness()
         elif target == _GOOSE:
             _manage_goose_harness()
-        elif target == _ACP:
-            _manage_acp_harness()
+        elif target == _ACP_ADD:
+            _add_acp_agent()
+        elif isinstance(target, str) and target.startswith(_ACP_AGENT_PREFIX):
+            _manage_acp_agent(target[len(_ACP_AGENT_PREFIX) :])
         elif target == _HERMES:
             _manage_hermes_harness()
         elif target == _KIRO:
