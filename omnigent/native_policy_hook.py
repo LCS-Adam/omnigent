@@ -20,6 +20,7 @@ model sees it).
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import secrets
@@ -465,6 +466,31 @@ def fail_closed_hook_output(
             "reason": request_reason,
         }
     return None
+
+
+def _jwt_exp(token: str) -> float | None:
+    """Extract the ``exp`` claim from a JWT without verifying the signature.
+
+    Used only to decide whether to proactively re-mint before the token lapses
+    — the server still validates the token on receipt. Returns ``None`` when
+    the token is not a well-formed JWT or carries no ``exp``.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        # JWT payload is base64url without padding; pad to a multiple of 4.
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+        exp = payload.get("exp")
+        return float(exp) if isinstance(exp, (int, float)) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# Re-mint the baked bearer this many seconds before it expires — absorbs
+# clock skew and the round-trip latency of the mint itself.
+_PROACTIVE_REAUTH_MARGIN_S = 300.0
 
 
 def post_evaluate_with_retry(
