@@ -84,17 +84,19 @@ from omnigent.entities.conversation import (
 )
 from omnigent.entities.permission import SessionPermission
 from omnigent.entities.session_resources import session_resource_view_to_dict
-from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.host.frames import (
-    HARNESS_NOT_CONFIGURED_ERROR_CODE as _HARNESS_NOT_CONFIGURED_ERROR_CODE,
-)
-from omnigent.model_override import validate_model_override
-from omnigent.native_coding_agents import (
+from omnigent.errors import ElicitationDeclinedError, ErrorCode, OmnigentError
+from omnigent.harness_plugins import (
     CLAUDE_NATIVE_CODING_AGENT,
     CODEX_NATIVE_CODING_AGENT,
     CURSOR_NATIVE_CODING_AGENT,
     KIRO_NATIVE_CODING_AGENT,
     NativeCodingAgent,
+)
+from omnigent.host.frames import (
+    HARNESS_NOT_CONFIGURED_ERROR_CODE as _HARNESS_NOT_CONFIGURED_ERROR_CODE,
+)
+from omnigent.model_override import validate_model_override
+from omnigent.native_coding_agents import (
     native_coding_agent_for_agent_name,
     native_coding_agent_for_harness,
     native_coding_agent_for_terminal_name,
@@ -200,6 +202,9 @@ from omnigent.server.schemas import (
     ChildSessionSummary,
     CompletedEvent,
     ConversationDeleted,
+    CopiedFile,
+    CopyFilesRequest,
+    CopyFilesResponse,
     CreatedSessionResponse,
     ElicitationRequestEvent,
     ElicitationRequestParams,
@@ -213,6 +218,7 @@ from omnigent.server.schemas import (
     OutputTextDeltaEvent,
     PaginatedList,
     PermissionObject,
+    PolicyDeniedEvent,
     PolicySummary,
     ReadStatePutRequest,
     ReasoningStartedEvent,
@@ -487,6 +493,29 @@ def _publish_collaboration_mode(session_id: str, mode: str) -> None:
         type="session.collaboration_mode",
         conversation_id=session_id,
         mode=mode,
+    )
+    session_stream.publish(session_id, event.model_dump())
+
+
+def _publish_policy_denied(session_id: str, reason: str, phase: str) -> None:
+    """
+    Publish a native policy-DENY signal on the session stream.
+
+    A native harness's policy DENY is decided synchronously in the
+    ``/policies/evaluate`` hook response, so nothing on the stream otherwise
+    reflects that an action was blocked. This surfaces the decision as a
+    positive event for observers (web UI, capability bench). Fire-and-forget.
+
+    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    :param reason: Deny reason from the deciding policy.
+    :param phase: The policy phase the DENY landed on, e.g. ``"tool_call"``.
+    :returns: None.
+    """
+    event = PolicyDeniedEvent(
+        type="response.policy_denied",
+        conversation_id=session_id,
+        reason=reason,
+        phase=phase,
     )
     session_stream.publish(session_id, event.model_dump())
 
@@ -838,6 +867,14 @@ _WATCHER_TASKS: set[asyncio.Task[None]] = set()
 # Used by _get_session_snapshot.
 _session_status_cache: dict[str, str] = {}
 
+# Per-session in-flight response id, tracked alongside _session_status_cache.
+# Set when a running/waiting status edge carries a response_id (native Claude's
+# turn-start edge does); popped on idle/failed. Projected onto the session
+# snapshot as ``active_response_id`` so a client reconnecting mid-turn can
+# reopen the streaming ``activeResponse`` and keep forwarded tool cards
+# rendering LIVE — the SSE stream is "snapshot + live tail, no replay", so the
+# turn-start ``running`` event is never re-sent on reconnect.
+_session_active_response_cache: dict[str, str] = {}
 # Per-session background-shell tally (claude-native), kept in lockstep with
 # ``_session_status_cache`` so a snapshot/reload re-shows "N background tasks
 # still running" after the live SSE edge is gone. The authoritative source is
@@ -2533,6 +2570,11 @@ def _build_session_response(
         # once the launch succeeds; a failed launch is retained with
         # its reason. Populated by _publish_sandbox_status.
         sandbox_status=_session_sandbox_status_cache.get(conv.id),
+        # In-flight turn id so a mid-turn reconnect can reopen a streaming
+        # ``activeResponse`` (the turn-start ``running`` edge that carried it
+        # is not replayed on the SSE stream). Populated for native-terminal
+        # sessions whose forwarder stamps a turn id; ``None`` otherwise.
+        active_response_id=_session_active_response_cache.get(conv.id),
     )
 
 
@@ -4177,8 +4219,11 @@ async def _hold_native_ask_gate(
         used by ``POST /policies/evaluate`` retries so a hook retry after
         a transient 5xx / connect-drop does not prompt the human twice.
         ``None`` mints a fresh id (the default for non-retry callers).
-    :returns: ``True`` iff a human accepted; ``False`` on decline /
-        cancel / timeout / disconnect (fail closed).
+    :returns: ``True`` iff a human accepted; ``False`` on cancel /
+        timeout / disconnect (fail closed).
+    :raises ElicitationDeclinedError: when the human explicitly
+        declines (``action == "decline"``). Callers should abort the
+        turn rather than continuing with a DENY.
     """
     tool_name = data.get("name")
     tool_input = data.get("arguments")
@@ -4210,6 +4255,13 @@ async def _hold_native_ask_gate(
         tool_name=tool_name if isinstance(tool_name, str) else None,
         tool_input=tool_input if isinstance(tool_input, dict) else None,
     )
+    # Explicit user decline → raise so callers can abort the turn rather
+    # than feeding a DENY message to the LLM and letting it continue.
+    if verdict is not None and verdict.action == "decline":
+        raise ElicitationDeclinedError(
+            result.reason or "",
+            policy_name=result.deciding_policy,
+        )
     approved = verdict is not None and verdict.action == "accept"
     if approved:
         # POLICIES.md §7.2: writes accumulated by the ASKing policy
@@ -5389,8 +5441,20 @@ def _publish_status(
     # transition (compaction failure publishes ``running`` → ``idle``, not
     # ``failed``), so this is a safe, harness-agnostic invariant.
     if status == "idle" and _session_status_cache.get(session_id) == "failed":
+        # Session stays ``failed`` (terminal); the turn is over, so drop any
+        # tracked in-flight response id rather than leaving it for the
+        # snapshot to reopen a streaming bubble.
+        _session_active_response_cache.pop(session_id, None)
         return
     _session_status_cache[session_id] = status
+    # Track the in-flight response id for snapshot-based reconnect (see
+    # _session_active_response_cache). A running/waiting edge that names a
+    # turn opens it; any idle/failed edge closes it.
+    if status in ("running", "waiting"):
+        if response_id is not None:
+            _session_active_response_cache[session_id] = response_id
+    else:
+        _session_active_response_cache.pop(session_id, None)
     # Keep the background-shell tally sticky alongside the status (see the
     # cache's declaration). A ``Stop`` hook reports an authoritative count
     # (``None`` is never sent by it): a positive count sets the tally, and
@@ -5502,7 +5566,12 @@ def _last_task_error_from_labels(labels: Mapping[str, str]) -> dict[str, str] | 
     return None
 
 
-def _publish_runner_recovered_status(session_id: str) -> None:
+async def _publish_runner_recovered_status(
+    session_id: str,
+    conversation_store: ConversationStore,
+    *,
+    require_disconnect_code: bool = False,
+) -> None:
     """
     Clear a stale failed session status after runner recovery.
 
@@ -5513,12 +5582,47 @@ def _publish_runner_recovered_status(session_id: str) -> None:
     stale and should not keep the conversation marked failed until the
     next user turn emits ``running``.
 
+    Recovery also clears the durable ``last_task_error`` labels the
+    disconnect relay persisted. Those labels survive reload so an
+    ongoing disconnect still projects a "Disconnected" pill, but once
+    the runner is reachable again the session is healthy and idle — the
+    pill must drop without waiting for the next ``running`` edge.
+
+    An explicit rebind/handshake (a PATCH ``/clear`` or ``/switch``, or
+    the message-forward session-init) is a user-driven proof the runner
+    is live, so it clears any stale ``failed`` state. A *passive* tunnel
+    reconnect is weaker: the process merely came back on its own, saying
+    nothing about a genuine task error. Callers on that path pass
+    ``require_disconnect_code=True`` so only a ``runner_disconnected``
+    failure is cleared — a genuine task failure (``response.failed`` / a
+    setup error with any other ``last_task_error`` code) survives the
+    reconnect, keeping the red "Failed" pill instead of silently flipping
+    it back to idle and hiding the error.
+
     :param session_id: Session/conversation identifier, e.g.
         ``"conv_abc123"``.
+    :param conversation_store: Store used to read the persisted error
+        code and clear the labels on genuine recovery.
+    :param require_disconnect_code: When ``True`` (passive-reconnect
+        caller), only clear if the persisted ``last_task_error.code`` is
+        ``runner_disconnected``; when ``False`` (default, explicit
+        rebind/handshake), clear any stale ``failed`` state. Labels are
+        cleared in both cases.
     :returns: None.
     """
     if _session_status_cache.get(session_id) != "failed":
         return
+    # A passive reconnect must distinguish a benign runner disconnect
+    # from a real task failure: both land the cache on "failed", but only
+    # the disconnect persists a ``runner_disconnected`` label. The
+    # reconnect proves the runner is reachable again, which invalidates a
+    # disconnect failure but says nothing about a genuine task error —
+    # leave that one alone. Explicit rebinds skip this guard.
+    if require_disconnect_code:
+        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        last_error = _last_task_error_from_labels(conv.labels) if conv is not None else None
+        if last_error is None or last_error.get("code") != "runner_disconnected":
+            return
     _session_status_cache[session_id] = "idle"
     event = SessionStatusEvent(
         type="session.status",
@@ -5527,6 +5631,7 @@ def _publish_runner_recovered_status(session_id: str) -> None:
         error=None,
     )
     session_stream.publish(session_id, event.model_dump())
+    await _persist_session_status_error_labels(session_id, None, conversation_store)
 
 
 def _publish_terminal_pending(session_id: str, pending: bool) -> None:
@@ -6094,6 +6199,7 @@ async def _launch_runner_on_host(
             request_id=request_id,
             binding_token=binding_token,
             workspace=conv.workspace,
+            session_id=conv.id,
             # Canonical harness (see _resolve_harness) so the host runs the
             # same configuration check it does at create-time launch. None
             # (agent not resolvable) skips the host-side check — fail open.
@@ -6790,6 +6896,7 @@ async def _ensure_runner_session_initialized(
     session_id: str,
     conv: Conversation,
     runner_client: httpx.AsyncClient,
+    conversation_store: ConversationStore,
 ) -> None:
     """
     Drive — and wait for — the runner's session-init handshake.
@@ -6828,6 +6935,8 @@ async def _ensure_runner_session_initialized(
         ``agent_id`` and ``sub_agent_name`` for the handshake body.
     :param runner_client: Runner client already resolved for
         *session_id* (its tunnel is up).
+    :param conversation_store: Store used to clear persisted disconnect
+        error labels once the handshake proves the runner recovered.
     :returns: None.
     """
     try:
@@ -6845,7 +6954,7 @@ async def _ensure_runner_session_initialized(
         # via the same warning path rather than silently forwarding into a
         # half-initialized runner.
         resp.raise_for_status()
-        _publish_runner_recovered_status(session_id)
+        await _publish_runner_recovered_status(session_id, conversation_store)
     except (httpx.HTTPError, ConnectionError):
         _logger.warning(
             "Session-init handshake to runner failed for session %s; "
@@ -9900,13 +10009,23 @@ async def _relay_runner_stream(
         )
         # Publish a failed status so the client's SSE stream sees a
         # clean error event instead of silent truncation (#1114).
-        _publish_status(
+        disconnect_error = ErrorDetail(
+            code="runner_disconnected",
+            message="Runner disconnected unexpectedly.",
+        )
+        _publish_status(session_id, "failed", disconnect_error)
+        # Persist the disconnect cause as durable labels so the
+        # distinction survives into snapshots and child-session
+        # summaries. Without this the relay-fed cache only carries a
+        # generic ``failed`` and ``last_task_error`` is dropped, leaving
+        # the UI unable to tell a benign runner disconnect from a real
+        # task failure (Option B: render a "Disconnected" pill, not the
+        # red "Failed" pill). Cleared on the next ``running`` edge by the
+        # session.status handler, exactly like other failure labels.
+        await _persist_session_status_error_labels(
             session_id,
-            "failed",
-            ErrorDetail(
-                code="runner_disconnected",
-                message="Runner disconnected unexpectedly.",
-            ),
+            disconnect_error,
+            conversation_store,
         )
     except asyncio.CancelledError:
         raise
@@ -10944,15 +11063,21 @@ async def _evaluate_input_policy(
     # deciding policy's writes only on accept (POLICIES.md §7.2). Accept ->
     # ALLOW (fall through to forward the message); decline / timeout ->
     # DENY (fail-closed).
-    approved = await _hold_native_ask_gate(
-        request,
-        session_id=session_id,
-        phase=Phase.REQUEST,
-        data=body.data,
-        engine=engine,
-        result=result,
-        conversation_store=conversation_store,
-    )
+    try:
+        approved = await _hold_native_ask_gate(
+            request,
+            session_id=session_id,
+            phase=Phase.REQUEST,
+            data=body.data,
+            engine=engine,
+            result=result,
+            conversation_store=conversation_store,
+        )
+    except ElicitationDeclinedError as exc:
+        return {
+            "verdict": "deny",
+            "reason": exc.args[0] or "Denied by policy",
+        }
     if approved:
         return None
     return {
@@ -12111,18 +12236,40 @@ async def _create_session_from_existing_agent(
             request=request,
         )
 
-    # Git worktree creation (optional): the worktree becomes the
-    # stored workspace and its branch is recorded.
+    # Git worktree options (optional). Two modes on body.git:
+    #  - create (default): make a worktree; it becomes the stored
+    #    workspace and its branch is recorded.
+    #  - bind (existing_worktree): workspace already IS the worktree;
+    #    record its branch only, create nothing.
     git_branch: str | None = None
+    # Set to the created worktree path ONLY when Omnigent creates one.
+    # Gates create-rollback: an existing worktree bound via
+    # existing_worktree must never be force-removed on failure — it is
+    # the user's, not an Omnigent orphan.
+    created_worktree_path: str | None = None
     if body.git is not None:
-        created_worktree = await _create_session_worktree(
-            host_id=body.host_id,
-            source_repo=canonical_workspace,
-            git=body.git,
-            request=request,
-        )
-        canonical_workspace = created_worktree.worktree_path
-        git_branch = created_worktree.branch
+        if body.git.existing_worktree:
+            # Starting in a pre-existing worktree: no worktree is created, but
+            # record its branch so the sidebar shows it and the opt-in delete
+            # flow can offer to remove it. Validate the name (the host never
+            # runs git for this path, so the server is the only gate).
+            from omnigent.host.git_worktree import WorktreeError, validate_branch_name
+
+            try:
+                validate_branch_name(body.git.branch_name)
+            except WorktreeError as exc:
+                raise OmnigentError(exc.message, code=ErrorCode.INVALID_INPUT) from exc
+            git_branch = body.git.branch_name
+        else:
+            created_worktree = await _create_session_worktree(
+                host_id=body.host_id,
+                source_repo=canonical_workspace,
+                git=body.git,
+                request=request,
+            )
+            canonical_workspace = created_worktree.worktree_path
+            git_branch = created_worktree.branch
+            created_worktree_path = created_worktree.worktree_path
 
     # Native-terminal pass-through args.
     #
@@ -12185,12 +12332,18 @@ async def _create_session_from_existing_agent(
         # Broad catch is intentional: ANY create_conversation failure
         # (integrity error, name clash, ...) must trigger orphan-worktree
         # cleanup before the error propagates. We re-raise unchanged
-        # below, so nothing is swallowed. git_branch is set only on
-        # worktree success.
-        if git_branch is not None and canonical_workspace is not None and body.host_id is not None:
+        # below, so nothing is swallowed. Gate on created_worktree_path,
+        # NOT git_branch: only a worktree Omnigent created here may be
+        # force-removed. An existing worktree bound via workspace_branch
+        # also sets git_branch but is the user's — never destroy it.
+        if (
+            created_worktree_path is not None
+            and body.host_id is not None
+            and git_branch is not None
+        ):
             await _remove_session_worktree_best_effort(
                 host_id=body.host_id,
-                worktree_path=canonical_workspace,
+                worktree_path=created_worktree_path,
                 branch=git_branch,
                 delete_branch=True,
                 request=request,
@@ -14032,6 +14185,7 @@ def create_sessions_router(
                         request_id=request_id,
                         binding_token=binding_token,
                         workspace=resp.workspace,
+                        session_id=resp.id,
                         # Already canonical (see _resolve_harness); lets
                         # the host refuse an unconfigured harness before
                         # spawning. None (agent not resolvable) skips the
@@ -15101,7 +15255,7 @@ def create_sessions_router(
                             timeout=10.0,
                         )
                         if runner_init_resp.status_code < 400:
-                            _publish_runner_recovered_status(session_id)
+                            await _publish_runner_recovered_status(session_id, conversation_store)
                     except (httpx.HTTPError, ConnectionError):
                         # ConnectionError covers a tunnel close mid-POST
                         # (same source as the relay's except clause).
@@ -16210,16 +16364,37 @@ def create_sessions_router(
                         Phase.LLM_REQUEST,
                         Phase.REQUEST,
                     ):
-                        approved = await _hold_native_ask_gate(
-                            request,
-                            session_id=session_id,
-                            phase=phase,
-                            data=data,
-                            engine=engine,
-                            result=result,
-                            conversation_store=conversation_store,
-                            elicitation_id=hook_elicitation_id,
-                        )
+                        try:
+                            approved = await _hold_native_ask_gate(
+                                request,
+                                session_id=session_id,
+                                phase=phase,
+                                data=data,
+                                engine=engine,
+                                result=result,
+                                conversation_store=conversation_store,
+                                elicitation_id=hook_elicitation_id,
+                            )
+                        except ElicitationDeclinedError as exc:
+                            # Explicit user decline: interrupt the native
+                            # harness BEFORE returning the hook deny so the
+                            # Escape key reaches Claude Code's tmux pane first.
+                            # By the time the DENY response reaches the hook
+                            # subprocess, the abort signal is already queued.
+                            # Best-effort: forwarding failures are swallowed.
+                            await _forward_session_change_to_runner(
+                                session_id,
+                                _server_runner_router,
+                                {"type": "interrupt"},
+                            )
+                            verdict_body = {
+                                "result": "POLICY_ACTION_DENY",
+                                "reason": exc.args[0] or "Approval was declined.",
+                            }
+                            return Response(
+                                content=json.dumps(verdict_body),
+                                media_type="application/json",
+                            )
                         verdict_body: dict[str, Any] = (
                             {"result": "POLICY_ACTION_ALLOW"}
                             if approved
@@ -16255,6 +16430,13 @@ def create_sessions_router(
             _spawn_native_blocked_notice_forward(
                 session_id, result.reason or "Blocked by policy.", result.deciding_policy
             )
+        # A tool-call DENY is decided synchronously here, so nothing else on the
+        # stream reflects that the native tool was blocked. Publish a positive
+        # signal so observers (web UI, capability bench) see the decision rather
+        # than infer it from the blocked tool's absence. Observational, so it is
+        # not gated on write access.
+        if result.action == PolicyAction.DENY and phase == Phase.TOOL_CALL:
+            _publish_policy_denied(session_id, result.reason or "Blocked by policy.", phase.value)
         return Response(
             content=json.dumps(resp_body),
             media_type="application/json",
@@ -16327,6 +16509,16 @@ def create_sessions_router(
         )
         if result is None:
             return Response(status_code=status.HTTP_200_OK)
+        if result.action == "decline":
+            # Explicit user decline: interrupt Codex before returning the
+            # deny response, same as the Claude-native path. The await
+            # ensures the abort signal reaches Codex before it processes
+            # the decline result and lets the LLM continue.
+            await _forward_session_change_to_runner(
+                session_id,
+                _server_runner_router,
+                {"type": "interrupt"},
+            )
         body = codex_request.build_response(result)
         return Response(
             content=json.dumps(body),
@@ -16421,6 +16613,14 @@ def create_sessions_router(
         )
         if result is None:
             return Response(status_code=status.HTTP_200_OK)
+        if result.action == "decline":
+            # Explicit user decline: interrupt the native harness before
+            # returning the decline so the abort signal arrives first.
+            await _forward_session_change_to_runner(
+                session_id,
+                _server_runner_router,
+                {"type": "interrupt"},
+            )
         return Response(
             content=result.model_dump_json(),
             media_type="application/json",
@@ -16528,6 +16728,14 @@ def create_sessions_router(
         )
         if result is None:
             return Response(status_code=status.HTTP_200_OK)
+        if result.action == "decline":
+            # Explicit user decline: interrupt the native harness before
+            # returning the decline so the abort signal arrives first.
+            await _forward_session_change_to_runner(
+                session_id,
+                _server_runner_router,
+                {"type": "interrupt"},
+            )
         return Response(
             content=json.dumps(result.model_dump(exclude_none=True)),
             media_type="application/json",
@@ -16628,6 +16836,14 @@ def create_sessions_router(
         )
         if result is None:
             return Response(status_code=status.HTTP_200_OK)
+        if result.action == "decline":
+            # Explicit user decline: interrupt the native harness before
+            # returning the decline so the abort signal arrives first.
+            await _forward_session_change_to_runner(
+                session_id,
+                _server_runner_router,
+                {"type": "interrupt"},
+            )
         return Response(
             content=json.dumps(result.model_dump(exclude_none=True)),
             media_type="application/json",
@@ -16708,6 +16924,8 @@ def create_sessions_router(
         after: str | None = Query(default=None),
         before: str | None = Query(default=None),
         order: str = Query(default="desc", pattern="^(asc|desc)$"),
+        tool: str | None = Query(default=None),
+        session_name: str | None = Query(default=None),
     ) -> PaginatedList:
         """
         List sub-agent (child) sessions under a parent session.
@@ -16734,6 +16952,14 @@ def create_sessions_router(
         :param before: Cursor — return children before this one.
         :param order: Sort direction, ``"desc"`` (newest-first,
             default) or ``"asc"``. Sort column is ``created_at``.
+        :param tool: When set, only return children whose title
+            starts with this agent type (the segment before the
+            ``":"``). Combined with ``session_name`` to form the
+            exact title ``"{tool}:{session_name}"`` for server-side
+            filtering.
+        :param session_name: When set alongside ``tool``, only
+            return children whose title matches
+            ``"{tool}:{session_name}"`` exactly.
         :returns: A :class:`PaginatedList` of
             :class:`ChildSessionSummary` objects.
         :raises OmnigentError: 403 if the caller lacks READ on
@@ -16752,6 +16978,9 @@ def create_sessions_router(
                 "Session not found",
                 code=ErrorCode.NOT_FOUND,
             )
+        title_filter: str | None = None
+        if tool and session_name:
+            title_filter = f"{tool}:{session_name}"
         page = await asyncio.to_thread(
             conversation_store.list_conversations,
             limit=limit,
@@ -16761,6 +16990,7 @@ def create_sessions_router(
             parent_conversation_id=session_id,
             order=order,
             sort_by="created_at",
+            title=title_filter,
         )
         data = await _child_session_summaries_from_conversations(
             page.data,
@@ -17656,6 +17886,173 @@ def create_sessions_router(
             "object": "session.resource.deleted",
             "deleted": True,
         }
+
+    @router.post(
+        "/sessions/{session_id}/resources/files:copy",
+        response_model=None,
+    )
+    async def copy_session_files(
+        request: Request,
+        session_id: str,
+        body: CopyFilesRequest,
+    ) -> dict[str, Any]:
+        """
+        Copy lineage-owned files into this (destination) session.
+
+        Authorizes by spawn lineage: ``body.source_session_id`` must be a
+        STRICT ancestor of this session up the ``parent_conversation_id``
+        chain — the session may not name itself as the source. Each source
+        file is read and re-stored as a new child-scoped row owned by
+        ``session_id`` — this preserves the session-scoping invariant (the
+        child reads its OWN copy; no cross-session read grant is created).
+        Validation is all-or-nothing: an unauthorized source, a missing
+        file, or a request past the copy limits copies nothing.
+
+        The request is bounded before any blob is read: the file count and
+        the summed ``StoredFile.bytes`` are checked against the copy limits
+        during metadata validation, so an over-limit request is rejected
+        without buffering a single blob. Within the limits, files are copied
+        one at a time (read → create → put) so peak memory is a single blob,
+        not the whole batch.
+
+        :param request: The incoming FastAPI request (for auth).
+        :param session_id: Destination (child) session/conversation id.
+        :param body: Source session id plus the file ids to copy.
+        :returns: A ``session.files.copied`` object carrying the
+            ``{source_file_id: new_file_id}`` mapping.
+        """
+        from omnigent.server.server_config import (
+            copy_file_count_limit,
+            copy_total_bytes_limit,
+        )
+
+        await _validate_session(session_id, request, LEVEL_EDIT)
+        if file_store is None or artifact_store is None:
+            raise HTTPException(
+                status_code=501,
+                detail="file store not configured",
+            )
+
+        # Lineage authorization: the source must be a STRICT ancestor up
+        # the parent_conversation_id chain. A session may not name itself
+        # as the source — the contract is "copy files down from a parent",
+        # and a top-level session has no lineage to copy from.
+        if body.source_session_id not in set(
+            _ancestor_session_ids(conversation_store, session_id)
+        ):
+            raise OmnigentError(
+                "Source session is not an ancestor of this session",
+                code=ErrorCode.FORBIDDEN,
+            )
+
+        # Validate every source file WITHOUT reading a blob, enforcing the copy
+        # limits before any blob is read. Summing StoredFile.bytes here means
+        # an over-count or over-size request is rejected without buffering a
+        # single blob — a rejected request never spikes memory. artifact_store
+        # .exists() is a cheap metadata probe (S3 HEAD / local stat / DB row),
+        # NOT a blob read, so checking it here preserves the original
+        # "missing blob surfaces before any child row is created" guarantee
+        # without reintroducing the batch prefetch. The blobs themselves are
+        # fetched one at a time in the write loop below.
+        max_files = copy_file_count_limit()
+        max_total_bytes = copy_total_bytes_limit()
+        if len(body.file_ids) > max_files:
+            raise OmnigentError(
+                f"Cannot copy {len(body.file_ids)} files: limit is {max_files}",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        if len(set(body.file_ids)) != len(body.file_ids):
+            raise OmnigentError(
+                "file_ids must not contain duplicates",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        sources: list[StoredFile] = []
+        total_bytes = 0
+        for file_id in body.file_ids:
+            stored = file_store.get(file_id, session_id=body.source_session_id)
+            if stored is None or not artifact_store.exists(stored.id):
+                raise OmnigentError(
+                    f"File '{file_id}' not found in source session",
+                    code=ErrorCode.NOT_FOUND,
+                )
+            total_bytes += stored.bytes
+            if total_bytes > max_total_bytes:
+                raise OmnigentError(
+                    f"Cannot copy files: total size exceeds limit of {max_total_bytes} bytes",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            sources.append(stored)
+
+        # Commit the copies one file at a time (read → create → put) so peak
+        # memory is a single blob, not the whole batch. If any step fails
+        # mid-batch, roll back the rows/blobs already created.
+        mapping: dict[str, CopiedFile] = {}
+        created: list[str] = []
+        copied: list[StoredFile] = []
+        try:
+            for stored in sources:
+                content = artifact_store.get(stored.id)
+                new = file_store.create(
+                    session_id=session_id,
+                    filename=stored.filename,
+                    bytes=stored.bytes,
+                    content_type=stored.content_type,
+                )
+                created.append(new.id)
+                artifact_store.put(new.id, content)
+                # Carry the preserved filename + content_type back so the
+                # caller can attach the copy without a follow-up metadata GET.
+                mapping[stored.id] = CopiedFile(
+                    new_id=new.id,
+                    filename=new.filename,
+                    content_type=new.content_type,
+                )
+                copied.append(new)
+        except Exception as exc:
+            for new_id in created:
+                try:
+                    file_store.delete(new_id, session_id=session_id)
+                except Exception:  # noqa: BLE001 - rollback cleanup is best effort.
+                    _logger.warning(
+                        "Failed to delete copied file row during rollback: session=%s file_id=%s",
+                        session_id,
+                        new_id,
+                        exc_info=True,
+                    )
+                try:
+                    artifact_store.delete(new_id)
+                except Exception:  # noqa: BLE001 - rollback cleanup is best effort.
+                    _logger.warning(
+                        "Failed to delete copied file blob during rollback: session=%s file_id=%s",
+                        session_id,
+                        new_id,
+                        exc_info=True,
+                    )
+            raise OmnigentError(
+                "Failed to copy files into destination session",
+                code=ErrorCode.INTERNAL_ERROR,
+            ) from exc
+
+        # Resource events fire only after every write lands. Publishing them
+        # inside the copy loop would emit (and persist as transcript items)
+        # ``session.resource.created`` for early files, then a later write
+        # failure would roll back the file rows/blobs without compensating
+        # those events — clients would see phantom files that no longer
+        # exist. Keep the create + event all-or-nothing together.
+        for new in copied:
+            _publish_and_persist_resource_event(
+                session_id,
+                "session.resource.created",
+                resource_id=new.id,
+                resource_type="file",
+                conversation_store=conversation_store,
+                resource=_stored_file_to_resource(session_id, new),
+            )
+
+        return CopyFilesResponse(
+            session_id=session_id,
+            mapping=mapping,
+        ).model_dump()
 
     # ── Phase 3: environment filesystem proxy endpoints ──────────
 
@@ -19149,7 +19546,9 @@ def create_sessions_router(
             # forwarded into a TUI whose forwarder isn't attached, the
             # round-trip never mirrors back, and the optimistic bubble
             # sticks with no reply (host-restart bug).
-            await _ensure_runner_session_initialized(session_id, conv, runner_client)
+            await _ensure_runner_session_initialized(
+                session_id, conv, runner_client, conversation_store
+            )
         await _ensure_runner_relay_ready(
             session_id,
             conv.runner_id,

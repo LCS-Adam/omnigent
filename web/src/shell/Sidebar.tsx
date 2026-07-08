@@ -128,7 +128,8 @@ import { useResizableSidebar } from "@/hooks/useResizableSidebar";
 import { useSessionSwitchHotkey } from "@/hooks/useSessionSwitchHotkey";
 import { usePinnedSessionHotkeys } from "@/hooks/usePinnedSessionHotkeys";
 import { absoluteTime, relativeTime } from "@/lib/relativeTime";
-import { SettingsSidebarBody, useSettingsRoute } from "./settingsNav";
+import { MOD_KEY } from "@/components/KeyboardShortcutsDialog";
+import { SettingsSidebarBody, useSettingsRoute, useTrackSettingsReturn } from "./settingsNav";
 import {
   type ActiveChatOverride,
   COLLAPSED_SIDEBAR_SECTIONS_STORAGE_KEY,
@@ -169,6 +170,13 @@ interface SidebarProps {
    * letting the CSS transition animate to the resting state.
    */
   dragProgress?: number | null;
+  /**
+   * Open the global command palette (⌘K). The sidebar's "Search" button routes
+   * here rather than filtering inline: session search (title + chat content)
+   * lives in the palette, which the box now doubles as an entry point for.
+   * Optional (defaults to a no-op) so the sidebar renders standalone in tests.
+   */
+  onOpenSearch?: () => void;
 }
 
 /**
@@ -219,23 +227,52 @@ function ArchivedToast() {
   );
 }
 
+/**
+ * Compute the set of IDs to add for a shift-click range selection.
+ * Returns null when the range can't be computed (missing anchor or id).
+ */
+export function computeShiftSelectRange(
+  visibleIds: readonly string[],
+  anchorId: string,
+  targetId: string,
+): string[] | null {
+  const anchorIdx = visibleIds.indexOf(anchorId);
+  const targetIdx = visibleIds.indexOf(targetId);
+  if (anchorIdx === -1 || targetIdx === -1) return null;
+  const [start, end] = anchorIdx < targetIdx ? [anchorIdx, targetIdx] : [targetIdx, anchorIdx];
+  return visibleIds.slice(start, end + 1);
+}
+
 /** Fire the post-archive toast. Hoisted so it isn't a render-scoped closure. */
 function showArchivedToast() {
   showToast(<ArchivedToast />);
 }
 
-export function Sidebar({ open, onClose, dragProgress = null }: SidebarProps) {
-  const [searchQuery, setSearchQuery] = useState("");
-  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
+export function Sidebar({ open, onClose, dragProgress = null, onOpenSearch }: SidebarProps) {
   const [pinnedConversationIds, setPinnedConversationIds] = useState(readPinnedConversationIds);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-  const toggleSelected = useCallback((id: string) => {
+  const lastSelectedIdRef = useRef<string | null>(null);
+  const getVisibleIdsRef = useRef<() => string[]>(() => []);
+
+  const toggleSelected = useCallback((id: string, shiftKey?: boolean) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
+      if (shiftKey && lastSelectedIdRef.current != null) {
+        const range = computeShiftSelectRange(
+          getVisibleIdsRef.current(),
+          lastSelectedIdRef.current,
+          id,
+        );
+        if (range) {
+          for (const rid of range) next.add(rid);
+          return next;
+        }
+      }
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      lastSelectedIdRef.current = id;
       return next;
     });
   }, []);
@@ -251,20 +288,16 @@ export function Sidebar({ open, onClose, dragProgress = null }: SidebarProps) {
   const exitSelectionMode = useCallback(() => {
     setSelectionMode(false);
     setSelectedIds(new Set());
+    lastSelectedIdRef.current = null;
   }, []);
-
-  // Debounce search input so we don't fire a server request on every
-  // keystroke. 300 ms is fast enough to feel responsive.
-  useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearchQuery(searchQuery), 300);
-    return () => clearTimeout(timer);
-  }, [searchQuery]);
 
   // One paginated session list — sessions are no longer split by
   // connection state, so the sidebar fetches a single undifferentiated
   // list. Archived sessions are included (`includeArchived: true`) and
   // peeled into their own "Archived" section at the bottom of the list.
-  const conversationsQuery = useConversations(debouncedSearchQuery, true, {
+  // Session search now lives in the command palette (the "Search" button
+  // below), so the sidebar list itself is unfiltered.
+  const conversationsQuery = useConversations("", true, {
     reconcileWhileConnected: true,
   });
 
@@ -305,6 +338,10 @@ export function Sidebar({ open, onClose, dragProgress = null }: SidebarProps) {
   // for the settings section nav (see settingsNav.tsx) — entering settings
   // shouldn't replace the whole sidebar.
   const { inSettings } = useSettingsRoute();
+  // Remember the pre-settings location so "Back to Omnigent" returns to the
+  // conversation the user was viewing, not the home page. Tracked here since
+  // the sidebar stays mounted across the transition into settings.
+  useTrackSettingsReturn();
 
   // Sync pinned ids to localStorage whenever state changes. Keeping
   // the write here (instead of inside the state updater) preserves the
@@ -501,17 +538,25 @@ export function Sidebar({ open, onClose, dragProgress = null }: SidebarProps) {
               />
             ) : (
               <div className="relative mt-3 flex items-center gap-1.5">
-                <div className="relative flex-1">
-                  <SearchIcon className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-2.5 size-3.5 text-muted-foreground" />
-                  <input
-                    type="search"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    aria-label="Search sessions"
-                    placeholder="Search sessions"
-                    className="min-h-8 w-full rounded-full border border-input pr-3 pl-8 text-sm transition placeholder:text-muted-foreground focus-visible:outline-1 md:select-text"
-                  />
-                </div>
+                {/* "Search" opens the command palette (⌘K), which searches both
+                    session titles and chat content. It replaces the old inline
+                    filter box — the palette is the single search surface now.
+                    The `group` scope reveals the ⌘K badge on hover/focus. */}
+                <button
+                  type="button"
+                  onClick={() => onOpenSearch?.()}
+                  aria-label="Search"
+                  data-testid="sidebar-search-button"
+                  className="group relative flex min-h-8 flex-1 items-center rounded-full border border-input pr-2 pl-8 text-left text-sm text-muted-foreground transition hover:bg-muted focus-visible:outline-1"
+                >
+                  <SearchIcon className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-2.5 size-3.5" />
+                  <span className="flex-1 truncate">Search</span>
+                  {/* ⌘K hint — hidden until the button is hovered / focused,
+                      mirroring the sidebar's other hover-revealed affordances. */}
+                  <kbd className="ml-2 hidden shrink-0 items-center rounded-md border border-border bg-muted px-1.5 py-0.5 font-sans text-[10px] font-medium text-muted-foreground transition-opacity group-hover:inline-flex group-focus-visible:inline-flex">
+                    {MOD_KEY}K
+                  </kbd>
+                </button>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -543,13 +588,14 @@ export function Sidebar({ open, onClose, dragProgress = null }: SidebarProps) {
               conversationsQuery={conversationsQuery}
               scrollContainerRef={scrollContainerRef}
               onRowClick={onNavClick}
-              searchQuery={debouncedSearchQuery}
+              searchQuery=""
               pinnedConversationIds={pinnedConversationIds}
               onPinnedConversationIdsChange={setPinnedConversationIds}
               onTogglePinned={togglePinnedConversation}
               selectionMode={selectionMode}
               selectedIds={selectedIds}
               onToggleSelected={toggleSelected}
+              getVisibleIdsRef={getVisibleIdsRef}
             />
           </nav>
 
@@ -679,6 +725,7 @@ function ProjectFolder({
   selectedIds,
   onToggleSelected,
   onProjectAssigned,
+  projectRenderedIdsRef,
 }: {
   name: string;
   expanded: boolean;
@@ -691,8 +738,9 @@ function ProjectFolder({
   onTogglePinned: (conversationId: string) => void;
   selectionMode: boolean;
   selectedIds: Set<string>;
-  onToggleSelected: (conversationId: string) => void;
+  onToggleSelected: (conversationId: string, shiftKey?: boolean) => void;
   onProjectAssigned?: (projectName: string) => void;
+  projectRenderedIdsRef?: RefObject<Map<string, string[]>>;
 }) {
   const query = useProjectSessions(name, expanded);
   const pinnedSet = useMemo(() => new Set(pinnedConversationIds), [pinnedConversationIds]);
@@ -704,6 +752,16 @@ function ProjectFolder({
       activeOverride,
     );
   }, [query.data, pinnedSet, activeOverride]);
+
+  // Register this folder's rendered IDs synchronously during render so the
+  // shift-select range uses the real per-project data, not the global list.
+  const renderedIds = useMemo(
+    () => (expanded ? conversations.map((c) => c.id) : []),
+    [expanded, conversations],
+  );
+  if (projectRenderedIdsRef) {
+    projectRenderedIdsRef.current.set(name, renderedIds);
+  }
 
   // While the first page loads, show a "Loading…" footer instead of the "No
   // chats" empty state (which would otherwise flash before rows arrive).
@@ -780,7 +838,8 @@ interface ConversationListProps {
   onTogglePinned: (conversationId: string) => void;
   selectionMode: boolean;
   selectedIds: Set<string>;
-  onToggleSelected: (conversationId: string) => void;
+  onToggleSelected: (conversationId: string, shiftKey?: boolean) => void;
+  getVisibleIdsRef: RefObject<() => string[]>;
 }
 
 // permission_level null (no ACL row / legacy) or >= 4 both mean owner.
@@ -799,6 +858,7 @@ function ConversationList({
   selectionMode,
   selectedIds,
   onToggleSelected,
+  getVisibleIdsRef,
 }: ConversationListProps) {
   // All loaded conversations from the single paginated list (for pinned
   // backfill, normalization, and the flat session list).
@@ -809,6 +869,11 @@ function ConversationList({
 
   // Project names for grouping sessions by their reserved project label.
   const { data: projectNames = [] } = useProjects();
+
+  // Each ProjectFolder registers its actually-rendered conversation IDs here
+  // (synchronously during render) so shift-select ranges use the real rendered
+  // order, not the global paginated list which can diverge.
+  const projectRenderedIdsRef = useRef<Map<string, string[]>>(new Map());
 
   // Backfill pinned sessions that aren't in the loaded set.
   const loadedIds = useMemo(() => new Set(allConversations.map((c) => c.id)), [allConversations]);
@@ -901,6 +966,25 @@ function ConversationList({
       return next;
     });
   }, []);
+
+  // Auto-expand the Pinned section when a session is newly pinned, so a
+  // freshly-pinned chat can't hide inside a collapsed group. Only reacts to
+  // pins being *added* — unpinning or reordering leaves the collapsed
+  // preference alone.
+  const prevPinnedIds = useRef(pinnedConversationIds);
+  useEffect(() => {
+    const prev = new Set(prevPinnedIds.current);
+    const wasPinned = pinnedConversationIds.some((id) => !prev.has(id));
+    prevPinnedIds.current = pinnedConversationIds;
+    if (wasPinned) {
+      setCollapsedSections((prevCollapsed) => {
+        if (!prevCollapsed.includes("Pinned")) return prevCollapsed;
+        const next = prevCollapsed.filter((t) => t !== "Pinned");
+        writeCollapsedSidebarSections(next);
+        return next;
+      });
+    }
+  }, [pinnedConversationIds]);
 
   // When a search query appears, auto-expand all sections so results
   // in collapsed groups are visible. The user can still manually collapse
@@ -1116,6 +1200,24 @@ function ConversationList({
       ...visible("Shared with me", sections.shared),
     ].map((c) => c.id);
   }, [sections, effectiveCollapsedSections, expandedProjects]);
+  // Getter that builds the shift-select visible order on demand (at click
+  // time). Reading projectRenderedIdsRef lazily — rather than snapshotting it
+  // during render — guarantees the project segment is always fresh even when a
+  // ProjectFolder re-renders independently (async query resolve, session
+  // re-sort) without triggering a parent re-render.
+  getVisibleIdsRef.current = () => {
+    const vis = (title: string, list: readonly Conversation[]) =>
+      effectiveCollapsedSections.includes(title) ? [] : list.map((c) => c.id);
+    const projCollapsed = effectiveCollapsedSections.includes("Projects");
+    return [
+      ...vis("Pinned", sections.pinned),
+      ...(projCollapsed
+        ? []
+        : sections.projectGroups.flatMap((g) => projectRenderedIdsRef.current.get(g.name) ?? [])),
+      ...vis("Chats", sections.sessions),
+      ...vis("Shared with me", sections.shared),
+    ];
+  };
   useSessionSwitchHotkey(orderedConversationIds, activeId);
 
   // Cmd/Ctrl+1..9/0 jumps to the first ten pinned sessions (desktop only;
@@ -1300,6 +1402,7 @@ function ConversationList({
                     selectedIds={selectedIds}
                     onToggleSelected={onToggleSelected}
                     onProjectAssigned={expandProject}
+                    projectRenderedIdsRef={projectRenderedIdsRef}
                   />
                 ))}
               </SectionGroup>
@@ -1313,7 +1416,7 @@ function ConversationList({
                 active={activeDrag != null && (activeDrag.project != null || activeDrag.isPinned)}
               >
                 <ConversationSection
-                  title="Chats"
+                  title="Sessions"
                   conversations={sections.sessions}
                   pinnedConversationIds={pinnedConversationIds}
                   collapsed={effectiveCollapsedSections.includes("Chats")}
@@ -1654,7 +1757,7 @@ function ConversationSection({
   onTogglePinned: (conversationId: string) => void;
   selectionMode: boolean;
   selectedIds: Set<string>;
-  onToggleSelected: (conversationId: string) => void;
+  onToggleSelected: (conversationId: string, shiftKey?: boolean) => void;
   /** Placeholder shown when expanded with no rows (e.g. an empty project). */
   emptyMessage?: string;
   /** Indent the rows one extra step (used to nest a project's chats). */
@@ -2062,7 +2165,7 @@ function ConversationRow({
   onTogglePinned: (conversationId: string) => void;
   selectionMode: boolean;
   isSelected: boolean;
-  onToggleSelected: (conversationId: string) => void;
+  onToggleSelected: (conversationId: string, shiftKey?: boolean) => void;
   onProjectAssigned?: (projectName: string) => void;
 }) {
   // `useParams` reads from the active matched route. On `/`, the param is
@@ -2367,7 +2470,7 @@ function ConversationRow({
         if (selectionMode) {
           e.preventDefault();
           e.stopPropagation();
-          onToggleSelected(conversation.id);
+          onToggleSelected(conversation.id, e.shiftKey);
           return;
         }
         onClick(e);
