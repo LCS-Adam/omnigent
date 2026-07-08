@@ -2186,6 +2186,12 @@ class SessionListItem(BaseModel):
     :param viewer_unread: Whether the *requesting user* explicitly
         marked this session unread. Per-viewer; lifts the active-row
         dot suppression on the client. ``False`` by default.
+    :param search_snippet: Excerpt of the chat content that matched the
+        request's ``search_query``, centered on the match with ``…``
+        marking elided ends, so the search UI can show *where* a session
+        matched in its body. Present whenever the query hit an item body
+        (even if the title also matched); ``None`` on non-search reads and
+        when only the title matched.
     """
 
     id: str
@@ -2212,6 +2218,7 @@ class SessionListItem(BaseModel):
     comments_updated_at: int | None = None
     viewer_last_seen: int | None = None
     viewer_unread: bool = False
+    search_snippet: str | None = None
 
 
 class SessionList(BaseModel):
