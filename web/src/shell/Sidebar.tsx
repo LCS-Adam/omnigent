@@ -60,6 +60,7 @@ import {
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useParams } from "@/lib/routing";
 import { Button } from "@/components/ui/button";
 import {
@@ -131,6 +132,7 @@ import {
 } from "@/hooks/useUnseenConversations";
 import { cn } from "@/lib/utils";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
+import { prefetchSessionForSwitch } from "@/lib/sessionsApi";
 import { useResizableSidebar } from "@/hooks/useResizableSidebar";
 import { useSessionSwitchHotkey } from "@/hooks/useSessionSwitchHotkey";
 import { usePinnedSessionHotkeys } from "@/hooks/usePinnedSessionHotkeys";
@@ -154,6 +156,8 @@ import {
   sortByUpdatedAtDesc,
   togglePinnedConversationId,
 } from "./sidebarNav";
+
+const PREFETCH_DELAY = 100;
 
 // Positioning shared by both occupants of a row's trailing time-marker slot
 // (the session-state badge or the relative timestamp). On desktop the slot
@@ -2391,6 +2395,27 @@ function ConversationRow({
   // project flyout's HoverCard and leave it lingering over the chat. Gate the
   // flyout off below the `md` breakpoint (see `projectFlyoutName`).
   const isMobile = useIsMobileViewport();
+  const queryClient = useQueryClient();
+  const prefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prefetchSession = useCallback(() => {
+    if (isActive || selectionMode) return;
+    prefetchSessionForSwitch(queryClient, conversation.id);
+  }, [conversation.id, isActive, queryClient, selectionMode]);
+  const schedulePrefetch = useCallback(() => {
+    if (prefetchTimerRef.current !== null) clearTimeout(prefetchTimerRef.current);
+    prefetchTimerRef.current = setTimeout(() => {
+      prefetchTimerRef.current = null;
+      prefetchSession();
+    }, PREFETCH_DELAY);
+  }, [prefetchSession]);
+  useEffect(
+    () => () => {
+      if (prefetchTimerRef.current !== null) {
+        clearTimeout(prefetchTimerRef.current);
+      }
+    },
+    [],
+  );
   // Track the *live* active conversation id. Delete is fire-and-forget,
   // so the user can navigate to another conversation before the mutation
   // resolves — the onSuccess redirect must key off where they are now,
@@ -2702,6 +2727,8 @@ function ConversationRow({
         }
         onClick(e);
       }}
+      onPointerEnter={schedulePrefetch}
+      onFocus={prefetchSession}
       onDoubleClick={(e) => {
         if (selectionMode) return;
         if (!canEdit) return;
