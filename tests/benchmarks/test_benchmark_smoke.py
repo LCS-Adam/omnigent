@@ -11,6 +11,7 @@ is covered without paying the server-boot cost.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -20,7 +21,13 @@ from dev.benchmarks.omnigent.journeys import ALL_JOURNEYS
 from dev.benchmarks.omnigent.measure import RunResult, aggregate, check_thresholds
 from dev.benchmarks.omnigent.schema import SCHEMA_VERSION, build_report
 
-_SMOKE_JOURNEYS = ["list_sessions", "create_session", "get_session", "load_conversation_history"]
+_SMOKE_JOURNEYS = [
+    "list_sessions",
+    "create_session",
+    "get_session",
+    "load_conversation_history",
+    "search_sessions",
+]
 
 
 def _d(value: object) -> dict[str, object]:
@@ -31,8 +38,9 @@ def _d(value: object) -> dict[str, object]:
 
 def _smoke_args(**overrides: object) -> argparse.Namespace:
     """Tiny-count args so the smoke run boots the server once and finishes fast."""
-    base = {
+    base: dict[str, object] = {
         "journeys": _SMOKE_JOURNEYS,
+        "database_uri": None,  # empty throwaway SQLite — journeys self-seed a fallback
         "iterations": 2,
         "requests": 5,
         "concurrency": 1,
@@ -114,12 +122,15 @@ async def test_benchmark_smoke_end_to_end() -> None:
     assert passed  # no thresholds supplied → vacuously passes
     assert report["schema_version"] == SCHEMA_VERSION
     assert _d(report["config"])["with_runner"] is False
+    # No --database-uri → the throwaway-SQLite path, labelled "sqlite".
+    assert _d(report["config"])["backend"] == "sqlite"
 
     journeys = _d(report["journeys"])
     for name in _SMOKE_JOURNEYS:
         assert name in ALL_JOURNEYS
         block = _d(journeys[name])
         assert block["kind"] == "latency"
+        assert block["backend"] == "sqlite"
         run_rows = cast(list[dict[str, object]], block["runs"])
         assert run_rows, f"{name} produced no runs"
         # Zero failures — a failure here means the HTTP path itself broke.
@@ -134,3 +145,58 @@ async def test_benchmark_smoke_threshold_failure_exits_nonzero() -> None:
         _smoke_args(journeys=["list_sessions"], max_p50_ms=0.0001)
     )
     assert not passed
+
+
+# ── seeder (direct store, no server) ─────────────────────────
+
+
+def test_seed_creates_listable_corpus(tmp_path: Path) -> None:
+    """Seed a tiny corpus and confirm it is listable as "local" with history."""
+    from dev.benchmarks.omnigent import seed as seed_mod
+    from omnigent.server.auth import RESERVED_USER_LOCAL
+    from omnigent.stores.conversation_store.sqlalchemy_store import (
+        SqlAlchemyConversationStore,
+    )
+
+    db_uri = f"sqlite:///{tmp_path / 'seed.db'}"
+
+    created = seed_mod.seed(db_uri, sessions=6, items_per_session=4)
+    assert created == 6
+
+    conv = SqlAlchemyConversationStore(db_uri)
+    listing = conv.list_conversations(
+        limit=100,
+        agent_name="bench-agent",
+        accessible_by=RESERVED_USER_LOCAL,
+        has_agent_id=True,
+    )
+    assert len(listing.data) == 6  # all seeded sessions listable as "local"
+    assert len(conv.list_items(listing.data[0].id, limit=100).data) == 4
+
+    # Idempotent: a matching re-seed is a no-op.
+    assert seed_mod.seed(db_uri, sessions=6, items_per_session=4) == 0
+
+
+def test_seed_schema_revision_matches_head() -> None:
+    """SEED_SCHEMA_REVISION must equal the repo's current Alembic head.
+
+    This is the invariant the drift guard (scripts/check_benchmark_seed_schema)
+    enforces in CI/pre-commit; asserting it here fails fast in the unit suite
+    when a migration lands without the seed being refreshed.
+    """
+    from dev.benchmarks.omnigent import seed as seed_mod
+    from omnigent.db.utils import _get_head_db_revision
+
+    assert _get_head_db_revision("sqlite:///:memory:") == seed_mod.SEED_SCHEMA_REVISION
+
+
+def test_seed_schema_guard_passes_and_detects_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The drift-guard script exits 0 at head and 1 when the revision is stale."""
+    import scripts.check_benchmark_seed_schema as guard
+
+    assert guard.main([]) == 0
+
+    # The guard binds SEED_SCHEMA_REVISION by value at import (``from … import``),
+    # so patch the name in the guard's own namespace, not the seed module's.
+    monkeypatch.setattr(guard, "SEED_SCHEMA_REVISION", "stale_revision")
+    assert guard.main([]) == 1

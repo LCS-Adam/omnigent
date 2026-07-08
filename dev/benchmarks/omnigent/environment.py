@@ -81,6 +81,12 @@ class BenchEnvironment:
         v1 HTTP-journey path. When ``True``, also spawn the mock LLM and a
         runner and wire the policy classifier at the mock — the phase-2
         full-turn path.
+    :param database_uri: SQLAlchemy URI the server boots against. ``None``
+        (default) uses a fresh throwaway SQLite file in the temp dir — the
+        empty-DB path. Pass a pre-seeded URI (e.g. a seeded SQLite file, or a
+        ``postgresql+psycopg://…`` instance) to benchmark against a realistic
+        corpus. Postgres must be the fully-qualified ``+psycopg`` form — the
+        server CLI does not normalize it.
     :param harness: Harness for full-turn agents when ``with_runner`` (default
         ``openai-agents``, a base dependency needing no vendor CLI binary).
     :param model: Model string baked into registered agent specs.
@@ -90,10 +96,12 @@ class BenchEnvironment:
         self,
         *,
         with_runner: bool = False,
+        database_uri: str | None = None,
         harness: str = _DEFAULT_HARNESS,
         model: str = _DEFAULT_MODEL,
     ) -> None:
         self.with_runner = with_runner
+        self.database_uri = database_uri
         self.harness = harness
         self.model = model
         self.base_url = ""
@@ -198,7 +206,10 @@ class BenchEnvironment:
         binding_token: str,
         artifact_dir: Path,
     ) -> subprocess.Popen[bytes]:
-        db_path = self._tmp / "bench.db"
+        # Pre-seeded URI when given (realistic corpus), else a throwaway SQLite
+        # file in the temp dir (the empty-DB path). SQLite absolute paths need
+        # four slashes; the temp path is absolute.
+        db_uri = self.database_uri or f"sqlite:///{self._tmp / 'bench.db'}"
         args = [
             server_executable(),
             "-m",
@@ -207,7 +218,7 @@ class BenchEnvironment:
             "--port",
             str(port),
             "--database-uri",
-            f"sqlite:///{db_path}",
+            db_uri,
             "--artifact-location",
             str(artifact_dir),
         ]

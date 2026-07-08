@@ -39,8 +39,10 @@ JourneyContext = object
 
 JourneyKind = Literal["latency", "throughput"]
 
-# Items seeded into the session that load_conversation_history reads back.
-_HISTORY_SEED_ITEMS = 20
+# Items requested per history-read page. Also the count self-seeded into a
+# fallback session when the DB has no corpus (empty-DB smoke path).
+_HISTORY_PAGE_LIMIT = 20
+_HISTORY_SEED_ITEMS = _HISTORY_PAGE_LIMIT
 
 
 @dataclass
@@ -167,14 +169,32 @@ async def run_throughput(
 # concurrency-safe journeys don't interfere across in-flight calls.
 
 
+# A token present in the seeded corpus (titles + item text, see seed.py
+# _FRAGMENTS) so search_sessions exercises the LIKE path with real matches.
+_SEARCH_TOKEN = "runner"
+
+
 async def _setup_agent_id(env: BenchEnvironment) -> str:
     """Register the benchmark agent and return its id."""
     name = await env.ensure_agent()
     return await env.agent_id(name)
 
 
-async def _setup_seeded_session(env: BenchEnvironment) -> str:
-    """Register an agent, create a session, and populate it with history."""
+async def _setup_target_session(env: BenchEnvironment) -> str:
+    """Return a session id to read: an existing corpus session if any, else make one.
+
+    Real runs target a pre-seeded corpus (``seed.py``), so we read a
+    representative existing session. When the DB is empty (e.g. the smoke test
+    against a throwaway DB), fall back to creating one with a little history so
+    the journey still exercises the read path.
+    """
+    assert env.client is not None
+    listing = await env.client.get("/v1/sessions", params={"limit": 1})
+    listing.raise_for_status()
+    data = listing.json().get("data", [])
+    if data:
+        return str(data[0]["id"])
+    # Empty DB: self-seed one session over HTTP (runner-free).
     name = await env.ensure_agent()
     agent_id = await env.agent_id(name)
     session_id = await env.create_session(agent_id)
@@ -185,6 +205,14 @@ async def _setup_seeded_session(env: BenchEnvironment) -> str:
 async def _measure_list_sessions(env: BenchEnvironment, _ctx: JourneyContext) -> None:
     assert env.client is not None
     resp = await env.client.get("/v1/sessions", params={"limit": 20})
+    resp.raise_for_status()
+
+
+async def _measure_search_sessions(env: BenchEnvironment, _ctx: JourneyContext) -> None:
+    assert env.client is not None
+    resp = await env.client.get(
+        "/v1/sessions", params={"limit": 20, "search_query": _SEARCH_TOKEN}
+    )
     resp.raise_for_status()
 
 
@@ -202,17 +230,17 @@ async def _measure_create_session(env: BenchEnvironment, ctx: JourneyContext) ->
 
 async def _measure_get_session(env: BenchEnvironment, ctx: JourneyContext) -> None:
     assert env.client is not None
-    session_id = cast(str, ctx)  # _setup_seeded_session
+    session_id = cast(str, ctx)  # _setup_target_session
     resp = await env.client.get(f"/v1/sessions/{session_id}")
     resp.raise_for_status()
 
 
 async def _measure_load_history(env: BenchEnvironment, ctx: JourneyContext) -> None:
     assert env.client is not None
-    session_id = cast(str, ctx)  # _setup_seeded_session
+    session_id = cast(str, ctx)  # _setup_target_session
     resp = await env.client.get(
         f"/v1/sessions/{session_id}/items",
-        params={"order": "asc", "limit": _HISTORY_SEED_ITEMS},
+        params={"order": "asc", "limit": _HISTORY_PAGE_LIMIT},
     )
     resp.raise_for_status()
 
@@ -241,7 +269,7 @@ ALL_JOURNEYS: dict[str, Journey] = {
             name="get_session",
             kind="latency",
             measure=_measure_get_session,
-            setup=_setup_seeded_session,
+            setup=_setup_target_session,
             concurrency_safe=True,
             description="GET /v1/sessions/{id} — single-session snapshot.",
         ),
@@ -249,9 +277,16 @@ ALL_JOURNEYS: dict[str, Journey] = {
             name="load_conversation_history",
             kind="latency",
             measure=_measure_load_history,
-            setup=_setup_seeded_session,
+            setup=_setup_target_session,
             concurrency_safe=True,
             description="GET /v1/sessions/{id}/items — conversation history read.",
+        ),
+        Journey(
+            name="search_sessions",
+            kind="latency",
+            measure=_measure_search_sessions,
+            concurrency_safe=True,
+            description="GET /v1/sessions?search_query= — unindexed LIKE over titles + items.",
         ),
     )
 }

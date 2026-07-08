@@ -54,6 +54,19 @@ _WITH_RUNNER = False
 _HARNESS = "http-only"
 
 
+def _backend_of(database_uri: str | None) -> str:
+    """Classify the DB URI into a coarse backend label for the report.
+
+    ``None`` is the harness's throwaway SQLite temp file. Otherwise key off the
+    URI scheme so the report (and the workspace dashboard) can group by backend.
+    """
+    if database_uri is None or database_uri.startswith("sqlite"):
+        return "sqlite"
+    if database_uri.startswith("postgres"):
+        return "postgres"
+    return "other"
+
+
 async def _run_journey(
     journey: Journey, env: BenchEnvironment, args: argparse.Namespace
 ) -> tuple[str, list[RunResult]]:
@@ -91,14 +104,16 @@ async def run_benchmark(args: argparse.Namespace) -> tuple[dict[str, object], bo
     journeys = resolve_journeys(args.journeys)
     journey_results: dict[str, dict[str, object]] = {}
     passed = True
+    backend = _backend_of(args.database_uri)
 
-    async with BenchEnvironment(with_runner=_WITH_RUNNER) as env:
+    async with BenchEnvironment(with_runner=_WITH_RUNNER, database_uri=args.database_uri) as env:
         for journey in journeys:
-            console.print(f"\n[bold]Benchmarking[/bold] {journey.name}")
+            console.print(f"\n[bold]Benchmarking[/bold] {journey.name} [dim]({backend})[/dim]")
             kind, results = await _run_journey(journey, env, args)
             print_results(journey.name, results)
             block = aggregate(results)
             block["kind"] = kind
+            block["backend"] = backend
             journey_results[journey.name] = block
             if not check_thresholds(
                 results,
@@ -115,6 +130,7 @@ async def run_benchmark(args: argparse.Namespace) -> tuple[dict[str, object], bo
         "runs": args.runs,
         "warmup": args.warmup,
         "with_runner": _WITH_RUNNER,
+        "backend": backend,
     }
     generated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     report = build_report(
@@ -138,6 +154,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         metavar="A,B,C",
         help=f"Comma-separated journeys to run. Default: all ({', '.join(ALL_JOURNEYS)}).",
+    )
+    parser.add_argument(
+        "--database-uri",
+        default=None,
+        metavar="URI",
+        help="DB the server boots against — a pre-seeded SQLite file or a "
+        "postgresql+psycopg://… instance (see seed.py). Default: a fresh "
+        "throwaway SQLite DB (empty — best-case numbers). The report's "
+        "`backend` field is derived from this.",
     )
     parser.add_argument(
         "--iterations",
