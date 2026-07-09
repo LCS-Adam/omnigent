@@ -277,11 +277,13 @@ jobs:
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
         with:
           enable-cache: true
+      - name: Install system MySQL client library
+        run: sudo apt-get update -qq && sudo apt-get install -y -q libmysqlclient-dev
       - name: Install dependencies
-        run: uv sync --locked --extra all --extra dev --extra databricks
+        run: uv sync --locked --extra all --extra dev --extra databricks && uv pip install mysqlclient
       - name: Run store + DB tests against MySQL
         env:
-          OMNIGENT_TEST_DB_URI: mysql+pymysql://root:omnigent@127.0.0.1:3306/omnigent_root
+          OMNIGENT_TEST_DB_URI: mysql+mysqldb://root:omnigent@127.0.0.1:3306/omnigent_root
         run: |
           uv run pytest tests/stores tests/db \
             -m "not databricks" \
