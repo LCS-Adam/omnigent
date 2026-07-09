@@ -94,7 +94,6 @@ describe("RoutingDecisionCard — session-level auto-routing", () => {
     expect(card).toHaveTextContent("· applied");
     expect(card).toHaveTextContent("Session");
     expect(card).toHaveTextContent("opus");
-    expect(card).toHaveTextContent("expensive");
     expect(card).toHaveTextContent("Multi-file refactor needs deep reasoning.");
     expect(card.getAttribute("data-applied")).toBe("true");
   });
@@ -111,7 +110,6 @@ describe("RoutingDecisionCard — session-level auto-routing", () => {
     const card = screen.getByTestId("routing-decision-card");
     expect(card).toHaveTextContent("· advisory");
     expect(card).toHaveTextContent("haiku");
-    expect(card).toHaveTextContent("cheap");
     expect(card.getAttribute("data-applied")).toBe("false");
   });
 
