@@ -2837,21 +2837,10 @@
             "description": "The router's one-line explanation, shown as muted secondary text, e.g. `\"Multi-file refactor needs deep reasoning.\"`.",
             "title": "Rationale",
             "type": "string"
-          },
-          "tier": {
-            "description": "The difficulty tier the router assigned, one of `\"cheap\"` / `\"medium\"` / `\"expensive\"`, e.g. `\"expensive\"`.",
-            "enum": [
-              "cheap",
-              "medium",
-              "expensive"
-            ],
-            "title": "Tier",
-            "type": "string"
           }
         },
         "required": [
           "model",
-          "tier",
           "applied",
           "rationale"
         ],

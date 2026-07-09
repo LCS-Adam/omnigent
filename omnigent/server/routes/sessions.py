@@ -8607,11 +8607,9 @@ async def _emit_server_routing_decision(
 
     from omnigent.runtime import session_stream
 
-    tier = verdict.get("tier", "medium")
     rationale = verdict.get("rationale", "")
     item_data: dict[str, Any] = {
         "model": model,
-        "tier": tier if tier in ("cheap", "medium", "expensive") else "medium",
         "applied": True,
         "rationale": rationale if isinstance(rationale, str) else "",
     }
@@ -9298,8 +9296,7 @@ def _routing_decision_item_from_sse(
     double render).
 
     Returns ``None`` for every other event, and for a malformed routing
-    item (empty model / unknown tier) so a bad frame can't poison the
-    relay.
+    item (empty model) so a bad frame can't poison the relay.
 
     :param event: Parsed SSE event dict from the runner stream.
     :returns: A ``routing_decision`` :class:`NewConversationItem`, or

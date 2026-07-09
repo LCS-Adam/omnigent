@@ -499,9 +499,6 @@ class RoutingDecisionData(BaseModel):
 
     :param model: The concrete brain model the router chose, e.g.
         ``"databricks-claude-opus-4-8"``.
-    :param tier: The difficulty tier the router assigned, one of
-        ``"cheap"`` / ``"medium"`` / ``"expensive"``, e.g.
-        ``"expensive"``.
     :param applied: ``True`` when the brain actually ran on
         :attr:`model` this turn (optimize mode, no user pin); ``False``
         when the router only WOULD have picked it (advise/shadow mode, or
@@ -512,7 +509,6 @@ class RoutingDecisionData(BaseModel):
     """
 
     model: str
-    tier: Literal["cheap", "medium", "expensive"]
     applied: bool
     rationale: str
     #: Sub-agent name when this decision was made for a child session and the
