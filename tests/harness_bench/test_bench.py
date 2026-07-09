@@ -473,7 +473,7 @@ async def test_parallel_full_server_shares_one_server(monkeypatch: pytest.Monkey
     built: list[object] = []
 
     class _FakeShared:
-        def __init__(self, db_profile: str) -> None:
+        def __init__(self, env: object) -> None:
             built.append(self)
             self.registered: list[str] = []
 
@@ -529,6 +529,10 @@ async def test_parallel_full_server_shares_one_server(monkeypatch: pytest.Monkey
         "tests.harness_bench.bench.resolve_driver_class",
         lambda p, *, override=None, fast=False: _FSDriver,
     )
+    # Keep the shared-server gate cred-free: this test fakes the server + driver,
+    # so it must not depend on a resolvable Databricks profile (CI has none).
+    monkeypatch.setattr("tests.harness_bench.bench.bench_creds_skip_reason", lambda p: None)
+    monkeypatch.setattr("tests.harness_bench.bench.resolve_bench_env", lambda p: object())
 
     profiles = [
         BenchProfile(
