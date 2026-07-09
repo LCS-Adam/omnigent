@@ -378,6 +378,9 @@ target-version = "py310"
 extend-exclude = [
     "omnigent/inner/databricks_mcps/google",
     "assistant-ui",
+    # Protobuf-generated code (DO NOT EDIT); not ours to restyle.
+    "omnigent/api/*_pb2.py",
+    "omnigent/api/*_pb2.pyi",
 ]
 
 [tool.ruff.lint]
@@ -494,7 +497,7 @@ disallow_any_explicit = true
 # setup.py — build-time scaffolding that imports the (untyped) setuptools
 # build_py and subclasses it; not application code, so excluded from mypy
 # rather than pulling in types-setuptools just for one shim file.
-exclude = ["^omnigent/inner/databricks_mcps/google/", "^setup\\.py$"]
+exclude = ["^omnigent/inner/databricks_mcps/google/", "^setup\\.py$", "_pb2\\.pyi?$"]
 # Incremental rollout: load imported modules for type info but don't
 # report their errors. Remove once every omnigent/ module is clean.
 follow_imports = "silent"
