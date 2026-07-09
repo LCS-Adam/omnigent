@@ -157,6 +157,8 @@ interface RoutingDecisionCardProps {
   tier: "cheap" | "medium" | "expensive";
   applied: boolean;
   rationale: string;
+  /** Sub-agent name when this card is shown in the parent session. */
+  agent?: string;
 }
 
 /**
@@ -165,13 +167,22 @@ interface RoutingDecisionCardProps {
  * rationale, and expandable raw verdict JSON.
  *
  * Shown in place of the muted chip when auto-routing fires at turn start
- * because the agent spec has no explicit model.
+ * because the agent spec has no explicit model. When `agent` is provided
+ * the card is being shown in the parent (orchestrator) session for a child
+ * session's routing decision — the agent name is shown as the row label.
  */
-export function RoutingDecisionCard({ model, tier, applied, rationale }: RoutingDecisionCardProps) {
+export function RoutingDecisionCard({
+  model,
+  tier,
+  applied,
+  rationale,
+  agent,
+}: RoutingDecisionCardProps) {
   const short = shortModelName(model);
+  const rowLabel = agent && agent.length > 0 ? agent : "Session";
   const prettyOutput = useMemo(
-    () => JSON.stringify({ model, tier, applied, rationale }, null, 2),
-    [model, tier, applied, rationale],
+    () => JSON.stringify({ model, tier, applied, rationale, ...(agent ? { agent } : {}) }, null, 2),
+    [model, tier, applied, rationale, agent],
   );
   return (
     <Collapsible
@@ -196,7 +207,7 @@ export function RoutingDecisionCard({ model, tier, applied, rationale }: Routing
         </CollapsibleTrigger>
       </div>
       <div className="flex items-center gap-2 text-xs">
-        <span className="min-w-0 truncate font-mono text-foreground">Session</span>
+        <span className="min-w-0 truncate font-mono text-foreground">{rowLabel}</span>
         <span className="ml-auto shrink-0 inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] leading-none">
           <span className="font-medium text-foreground">{short}</span>
           <span className="text-muted-foreground">· {tier}</span>

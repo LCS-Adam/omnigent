@@ -115,6 +115,23 @@ describe("RoutingDecisionCard — session-level auto-routing", () => {
     expect(card.getAttribute("data-applied")).toBe("false");
   });
 
+  it("shows agent name as row label when mirrored into parent session", () => {
+    render(
+      <RoutingDecisionCard
+        model="databricks-claude-haiku-4-5"
+        tier="cheap"
+        applied
+        rationale="Simple task."
+        agent="claude_code"
+      />,
+    );
+    const card = screen.getByTestId("routing-decision-card");
+    // The agent name replaces the generic "Session" label so the
+    // orchestrator's transcript identifies which sub-agent was routed.
+    expect(card).toHaveTextContent("claude_code");
+    expect(card.textContent).not.toContain("Session");
+  });
+
   it("expands raw verdict JSON behind the chevron", () => {
     render(
       <RoutingDecisionCard

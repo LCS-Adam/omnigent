@@ -2833,6 +2833,7 @@ export const BubbleView = memo(
           tier={bubble.tier}
           applied={bubble.applied}
           rationale={bubble.rationale}
+          agent={bubble.agent}
         />
       );
     }
