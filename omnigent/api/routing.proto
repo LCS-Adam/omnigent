@@ -3,13 +3,12 @@ syntax = "proto3";
 package omnigent.api.routing.v1;
 
 import "google/protobuf/struct.proto";
-import "buf/validate/validate.proto";
 
 // can evolve v1, v2, .. separately from ai-gateway while using ai-gateway API scope
 // POST https://<workspace-url>/ai-gateway/routing/v1/routes:select
 
 message RouteOption {
-  string model = 1;
+  optional string model = 1;
   optional string harness = 2; // optional if native harness, required if metaharness
 }
 
@@ -38,18 +37,18 @@ message RouteOption {
 //   "config": { "lambda": "if len(prompt)>10 then gpt-5-5 else kimi" }
 // }
 message RouteSelector {
-  string router = 1;
-  google.protobuf.Struct config = 2;
+  optional string router = 1;
+  optional google.protobuf.Struct config = 2;
 }
 
 message RouteSelection {
-  RouteOption route_option = 1;
-  google.protobuf.Struct params = 2;
+  optional RouteOption route_option = 1;
+  optional google.protobuf.Struct params = 2;
 }
 
 message SessionTurn {
-  Task task = 1;
-  RouteSelection route_selection = 2;
+  optional Task task = 1;
+  optional RouteSelection route_selection = 2;
 }
 
 message SessionHistory {
@@ -57,17 +56,17 @@ message SessionHistory {
 }
 
 message Task {
-  string prompt = 1;
+  optional string prompt = 1;
 }
 
 message SelectRouteRequest {
   repeated RouteOption route_options = 1;
-  Task task = 2;
-  RouteSelector route_selector = 3 [(buf.validate.field).required = true];
+  optional Task task = 2;
+  optional RouteSelector route_selector = 3;
   optional SessionHistory session_history = 4;
 }
 
 message SelectRouteResponse {
-  RouteSelection route_selection = 1;
-  string rationale = 2;
+  optional RouteSelection route_selection = 1;
+  optional string rationale = 2;
 }

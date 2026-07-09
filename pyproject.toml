@@ -103,9 +103,6 @@ dependencies = [
     # Protobuf schema for the AI-gateway routing API (omnigent/api/routing.proto).
     # Previously only a transitive dep; declared directly now that we ship a proto.
     "protobuf>=6,<7",
-    # buf.validate field constraints used by routing.proto; vendors
-    # buf/validate/validate.proto and provides runtime validation.
-    "protovalidate>=0.7,<1",
 ]
 
 [project.optional-dependencies]
