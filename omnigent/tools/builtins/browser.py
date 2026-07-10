@@ -8,9 +8,9 @@ do NOT implement ``invoke()``.
 Execution lives in the runner dispatch layer
 (``omnigent/runner/tool_dispatch.py`` — the ``_BROWSER_TOOLS`` branch),
 because the browser protocol needs the runner's ``server_client`` to
-POST a blocking action request to the AP, and ``ToolContext`` carries
+POST a blocking action request to the server, and ``ToolContext`` carries
 no ``server_client``. Any call that reaches ``Tool.invoke`` here means
-the tool was misrouted to the AP-side path — the base class raises
+the tool was misrouted to the server-side path — the base class raises
 ``NotImplementedError`` loudly in that case.
 
 Descriptions for the five browser tools that drive the Omnigent

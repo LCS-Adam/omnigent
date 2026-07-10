@@ -1,7 +1,7 @@
 """
 Integration tests for the embedded-browser action bridge routes.
 
-Covers the risk-critical AP-side routes that carry a runner ``browser_*``
+Covers the risk-critical server-side routes that carry a runner ``browser_*``
 tool call to the desktop renderer and back:
 
 - ``POST /sessions/{id}/browser/action_request`` — parks a Future,

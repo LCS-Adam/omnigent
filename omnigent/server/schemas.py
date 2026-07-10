@@ -3319,7 +3319,7 @@ class BrowserActionRequestEvent(_SSEEventBase):
     """
     Request that the desktop renderer perform one browser action.
 
-    Emitted by the AP ``POST /v1/sessions/{id}/browser/action_request``
+    Emitted by the server ``POST /v1/sessions/{id}/browser/action_request``
     route when a runner-side ``browser_*`` tool dispatch needs the
     Omnigent desktop app's embedded browser to act. The event fans out
     on the session stream to every subscribed renderer; each renderer

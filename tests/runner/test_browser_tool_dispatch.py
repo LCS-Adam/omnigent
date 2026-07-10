@@ -3,7 +3,7 @@
 Covers the runner-side half of the feature:
 
 - ``_execute_browser_tool``: the blocking ``server_client.post`` to the
-  AP ``/browser/action_request`` route — correct URL / ``action`` /
+  server ``/browser/action_request`` route — correct URL / ``action`` /
   ``args`` payload, verbatim JSON passthrough, and the clean timeout
   error on ``httpx.ReadTimeout``.
 - Registration in ``omnigent.tools.builtins``: the five ``browser_*``
@@ -102,11 +102,11 @@ async def test_browser_tool_posts_action_request_with_stripped_prefix() -> None:
     url, body, timeout = client.calls[0]
     assert url == "/v1/sessions/conv_abc/browser/action_request"
     assert body == {"action": "navigate", "args": {"url": "https://example.com"}}
-    # read budget MUST exceed the AP await (30s) so the runner never
+    # read budget MUST exceed the server await (30s) so the runner never
     # severs the still-open POST first.
     assert isinstance(timeout, httpx.Timeout)
     assert timeout.read == 60.0
-    # Result is the AP JSON verbatim.
+    # Result is the server JSON verbatim.
     assert json.loads(out) == {"final_url": "https://example.com"}
 
 

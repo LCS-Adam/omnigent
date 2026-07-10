@@ -610,9 +610,9 @@ _browser_action_owners: dict[str, str] = {}  # -> issuing session_id (result POS
 # double-execute; the result POST must present the matching token.
 _browser_action_claims: dict[str, str] = {}
 
-# AP-side wait budget for an interactive browser action. MUST stay below the
+# Server-side wait budget for an interactive browser action. MUST stay below the
 # runner's 60s read timeout (``_BROWSER_ACTION_TIMEOUT`` in tool_dispatch.py) so
-# the AP returns its own clean timeout JSON before the runner severs the POST.
+# the server returns its own clean timeout JSON before the runner severs the POST.
 _BROWSER_ACTION_AWAIT_S = 30.0
 
 # Returned (HTTP 200) when the await elapses with no renderer result (desktop app

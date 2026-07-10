@@ -318,7 +318,7 @@ _AGENT_TOOLS = frozenset({"sys_agent_get", "sys_agent_download", "sys_agent_list
 _POLICY_TOOLS = frozenset({"sys_add_policy", "sys_policy_registry"})
 
 # Priority 5m: Embedded-browser tools.
-# Runner dispatch POSTs a blocking action request to the AP, which parks a
+# Runner dispatch POSTs a blocking action request to the server, which parks a
 # Future + publishes ``browser.action_request`` on the session stream; the
 # Omnigent desktop renderer claims and executes the action, then POSTs the
 # result back. Execution lives HERE (not in Tool.invoke) because the browser
@@ -335,13 +335,13 @@ _BROWSER_TOOLS = frozenset(
 )
 
 # Runner-side outer HTTP read timeout for a browser action POST. The read
-# budget (60s) MUST exceed the AP-side browser-action await (30s) so the
-# runner never severs the still-open POST before the AP returns either the
+# budget (60s) MUST exceed the server-side browser-action await (30s) so the
+# runner never severs the still-open POST before the server returns either the
 # action result JSON or the clean timeout-error JSON. Fast connect (30s) so an
 # unreachable server still fails promptly.
 _BROWSER_ACTION_TIMEOUT = httpx.Timeout(60.0, connect=30.0)
 
-# Returned as the tool output (HTTP 200 body, not an exception) when the AP
+# Returned as the tool output (HTTP 200 body, not an exception) when the server
 # browser-action await elapses with no renderer result — a clear
 # "is the session open?" message so the LLM gets a clean, actionable error.
 _BROWSER_TIMEOUT_ERROR = (
@@ -2931,18 +2931,18 @@ async def _execute_browser_tool(
     Does the blocking round-trip that drives the Omnigent desktop app's
     embedded browser: POST ``/v1/sessions/{conversation_id}/browser/
     action_request`` with ``{action, args}`` (where ``action`` is the
-    tool name minus the ``browser_`` prefix) and return the AP's JSON
-    response verbatim as the tool output. The AP parks a Future,
+    tool name minus the ``browser_`` prefix) and return the server's JSON
+    response verbatim as the tool output. The server parks a Future,
     publishes ``browser.action_request`` on the session stream, and
     resolves the Future when the winning renderer POSTs the action
     result — so this POST stays open until the action completes or the
-    AP's 30s browser-action await elapses.
+    server's 30s browser-action await elapses.
 
     Mirrors the ask-gate ``server_client.post`` pattern in
     ``_execute_subagent_tool`` (with a much shorter read budget — see
     ``_BROWSER_ACTION_TIMEOUT``). On the runner-side read timeout
-    (should not fire before the AP returns its own clean timeout JSON,
-    since read(60) > AP await(30)), returns the same timeout-error JSON
+    (should not fire before the server returns its own clean timeout JSON,
+    since read(60) > server await(30)), returns the same timeout-error JSON
     so the LLM always sees a clean tool error rather than an exception.
 
     :param tool_name: The browser tool name, e.g. ``"browser_navigate"``.
@@ -2950,7 +2950,7 @@ async def _execute_browser_tool(
         ``{"url": "https://example.com"}``.
     :param server_client: HTTP client pointed at the Omnigent server.
     :param conversation_id: Current session id, e.g. ``"conv_abc123"``.
-    :returns: The AP action-result JSON string, or a timeout/error JSON.
+    :returns: The server action-result JSON string, or a timeout/error JSON.
     """
     if server_client is None:
         return json.dumps({"error": f"{tool_name} requires server access"})
@@ -2967,9 +2967,9 @@ async def _execute_browser_tool(
             timeout=_BROWSER_ACTION_TIMEOUT,
         )
     except httpx.ReadTimeout:
-        # The AP should return its own clean timeout JSON well before this
-        # fires (read(60) > AP await(30)); this is the belt-and-suspenders
-        # path if the AP itself stalls.
+        # The server should return its own clean timeout JSON well before this
+        # fires (read(60) > server await(30)); this is the belt-and-suspenders
+        # path if the server itself stalls.
         return _BROWSER_TIMEOUT_ERROR
     except httpx.HTTPError as exc:
         return json.dumps({"error": f"{tool_name} failed: {type(exc).__name__}: {exc}"})
