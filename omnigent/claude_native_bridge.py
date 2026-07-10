@@ -2933,18 +2933,24 @@ def _claude_prompt_rendered(pane: str) -> bool:
     it's framed by a box rule — the ``────`` closing line the live input
     box always renders below ``❯`` but a bare echoed prompt never has.
 
-    A ``❯`` on a selected numbered menu row is not the chat input and is
-    excluded from both scans (see :func:`_is_selected_menu_row`).
+    A bare ``❯`` on a selected numbered menu row is not the chat input. A
+    numbered line with an input-box rule below it still counts, however: the
+    readiness gate runs before every injection, so a restored composer draft
+    may legitimately begin with text such as ``2. buy milk``.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: ``True`` when the input box appears mounted.
     """
     non_empty = [line for line in pane.splitlines() if line.strip()]
-    if any(
-        _CLAUDE_PROMPT_GLYPH in line and not _is_selected_menu_row(line)
-        for line in non_empty[-_PROMPT_SCAN_TAIL_LINES:]
-    ):
-        return True
+    tail_start = max(0, len(non_empty) - _PROMPT_SCAN_TAIL_LINES)
+    for idx in range(tail_start, len(non_empty)):
+        line = non_empty[idx]
+        if _CLAUDE_PROMPT_GLYPH not in line:
+            continue
+        if not _is_selected_menu_row(line) or any(
+            _is_box_rule(rule) for rule in non_empty[idx + 1 :]
+        ):
+            return True
     # Above that window, trust the glyph only when a box rule sits below
     # it — the live input box's closing frame, absent from scrollback.
     # The footer height scales with concurrent subagents (a fan-out of
@@ -2952,7 +2958,7 @@ def _claude_prompt_rendered(pane: str) -> bool:
     # is a reliable structural signal at any depth, and `capture-pane -p`
     # returns only the visible pane, so this stays within one screen.
     for idx, line in enumerate(non_empty):
-        if _CLAUDE_PROMPT_GLYPH not in line or _is_selected_menu_row(line):
+        if _CLAUDE_PROMPT_GLYPH not in line:
             continue
         if any(_is_box_rule(rule) for rule in non_empty[idx + 1 :]):
             return True

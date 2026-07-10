@@ -5039,6 +5039,19 @@ def test_claude_prompt_rendered_sees_chat_input_below_menu_glyph() -> None:
     assert _claude_prompt_rendered(pane) is True
 
 
+def test_claude_prompt_rendered_sees_numbered_draft_in_framed_input() -> None:
+    """A numbered composer draft is distinguished from an unframed menu row."""
+    pane = "\n".join(
+        [
+            "────────────────────────────────────────",
+            "❯ 2. buy milk",
+            "────────────────────────────────────────",
+            "  Opus 4.8 (1M context) | effort:high",
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is True
+
+
 def _write_deltas_lines(bridge_dir: Path, lines: list[str]) -> None:
     """
     Append raw JSONL lines to the bridge deltas file.
