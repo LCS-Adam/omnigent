@@ -18,11 +18,13 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.policies.function import FunctionPolicy
 from omnigent.runtime.policies.builder import (
     _DEFAULT_POLICY_SPECS_CACHE,
+    _SESSION_POLICY_SPECS_CACHE,
     _load_default_policy_specs,
     _load_session_policy_specs,
     _stored_policy_to_spec,
     build_policy_engine,
     invalidate_default_policy_specs_cache,
+    invalidate_session_policy_specs_cache,
 )
 from omnigent.spec.types import (
     AgentSpec,
@@ -114,6 +116,73 @@ def test_stored_url_policy_raises() -> None:
 def test_load_session_policy_specs_none_store() -> None:
     """When ``policy_store`` is ``None``, returns an empty list."""
     assert _load_session_policy_specs("conv_123", None) == []
+
+
+def test_load_session_policy_specs_caches_result(db_uri: str) -> None:
+    """A second call returns the cached result without hitting the store.
+
+    :param db_uri: Per-test SQLite URI from the root conftest.
+    """
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    conv = conv_store.create_conversation()
+    store = SqlAlchemyPolicyStore(db_uri)
+    store.create(
+        policy_id="pol_cache",
+        session_id=conv.id,
+        name="cache_test",
+        type="python",
+        handler="myorg.policies.allow_all",
+        enabled=True,
+    )
+    _SESSION_POLICY_SPECS_CACHE.clear()
+
+    first = _load_session_policy_specs(conv.id, store)
+    store.create(
+        policy_id="pol_cache2",
+        session_id=conv.id,
+        name="cache_test2",
+        type="python",
+        handler="myorg.policies.allow_all",
+        enabled=True,
+    )
+    second = _load_session_policy_specs(conv.id, store)
+
+    assert second is first
+
+
+def test_invalidate_session_policy_specs_cache(db_uri: str) -> None:
+    """Invalidating the cache forces the next call to re-read from the store.
+
+    :param db_uri: Per-test SQLite URI from the root conftest.
+    """
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    conv = conv_store.create_conversation()
+    store = SqlAlchemyPolicyStore(db_uri)
+    store.create(
+        policy_id="pol_inv1",
+        session_id=conv.id,
+        name="inv_policy1",
+        type="python",
+        handler="myorg.policies.allow_all",
+        enabled=True,
+    )
+    _SESSION_POLICY_SPECS_CACHE.clear()
+
+    first = _load_session_policy_specs(conv.id, store)
+    assert len(first) == 1
+
+    store.create(
+        policy_id="pol_inv2",
+        session_id=conv.id,
+        name="inv_policy2",
+        type="python",
+        handler="myorg.policies.allow_all",
+        enabled=True,
+    )
+    invalidate_session_policy_specs_cache(conv.id)
+
+    second = _load_session_policy_specs(conv.id, store)
+    assert len(second) == 2
 
 
 def test_load_session_policy_specs_filters_disabled(db_uri: str) -> None:

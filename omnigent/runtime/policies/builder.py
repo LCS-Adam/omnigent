@@ -89,6 +89,13 @@ _DEFAULT_POLICY_SPECS_CACHE: cachetools.TTLCache[int, list[PolicySpec]] = cachet
     maxsize=256, ttl=30
 )
 
+# Invalidation-based cache of ``(workspace_id, conversation_id) -> list[PolicySpec]``
+# for session-scoped policies. Unlike defaults, session policies can be added
+# mid-session (via sys_add_policy), so a TTL would delay enforcement. Instead,
+# the cache is explicitly invalidated whenever a session policy is mutated via
+# the CRUD routes. Keyed by workspace to prevent cross-tenant leakage.
+_SESSION_POLICY_SPECS_CACHE: dict[tuple[int, str], list[PolicySpec]] = {}
+
 
 def _needs_user_daily_cost(specs: list[PolicySpec]) -> bool:
     """
@@ -998,6 +1005,22 @@ def invalidate_default_policy_specs_cache() -> None:
     _DEFAULT_POLICY_SPECS_CACHE.pop(current_workspace_id(), None)
 
 
+def invalidate_session_policy_specs_cache(conversation_id: str) -> None:
+    """
+    Evict a conversation's entry from the session policy specs cache.
+
+    Call this after any mutation (create, update, delete) of a session
+    policy so the next :func:`build_policy_engine` call re-reads from
+    the DB. Scoped to the current workspace context.
+
+    :param conversation_id: The session whose cache entry to evict,
+        e.g. ``"conv_abc123"``.
+    """
+    from omnigent.db.db_models import current_workspace_id
+
+    _SESSION_POLICY_SPECS_CACHE.pop((current_workspace_id(), conversation_id), None)
+
+
 def _load_session_policy_specs(
     conversation_id: str,
     policy_store: PolicyStore | None,
@@ -1005,6 +1028,12 @@ def _load_session_policy_specs(
     """
     Load enabled session policies from the store and convert
     them to :class:`FunctionPolicySpec` instances.
+
+    Results are cached per ``(workspace_id, conversation_id)`` and
+    invalidated on any mutation via :func:`invalidate_session_policy_specs_cache`.
+    There is no TTL — the cache entry is permanent until explicitly evicted,
+    so session policy changes (including ``sys_add_policy``) take effect
+    immediately on the next engine build.
 
     Only ``type="python"`` policies are instantiable today. An
     enabled policy of an unsupported type (e.g. ``type="url"``)
@@ -1022,12 +1051,19 @@ def _load_session_policy_specs(
     """
     if policy_store is None:
         return []
+    from omnigent.db.db_models import current_workspace_id
+
+    key = (current_workspace_id(), conversation_id)
+    cached = _SESSION_POLICY_SPECS_CACHE.get(key)
+    if cached is not None:
+        return cached
     stored = policy_store.list_for_session(conversation_id)
     specs: list[PolicySpec] = []
     for policy in stored:
         if not policy.enabled:
             continue
         specs.append(_stored_policy_to_spec(policy))
+    _SESSION_POLICY_SPECS_CACHE[key] = specs
     return specs
 
 
@@ -1075,4 +1111,8 @@ def _stored_policy_to_spec(policy: StoredPolicy) -> PolicySpec:
     )
 
 
-__all__ = ["build_policy_engine", "invalidate_default_policy_specs_cache"]
+__all__ = [
+    "build_policy_engine",
+    "invalidate_default_policy_specs_cache",
+    "invalidate_session_policy_specs_cache",
+]
