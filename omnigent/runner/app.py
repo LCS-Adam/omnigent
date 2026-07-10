@@ -5102,22 +5102,21 @@ def _claude_terminal_env_unset(
     servers don't inherit the runner's ambient Databricks profile and
     resolve auth against the wrong workspace.
 
-    When the launch config carries an ``apiKeyHelper``, also drops the raw
-    ``ANTHROPIC_API_KEY`` and ``CLAUDECODE``. Claude Code — seeing both a raw
-    key and the helper — opens its "Detected a custom API key" menu, whose
-    selected row uses the same ``❯`` glyph the tmux delivery path waits for, so
-    the first web message is typed into the menu and no turn starts.
-    ``CLAUDECODE`` is stripped alongside it to avoid a nested-session error,
-    mirroring the claude-sdk executor's spawn.
+    Always drops ``CLAUDECODE`` because Claude Code rejects any child launch
+    carrying that nested-session marker, regardless of its auth mode. When the
+    launch config carries an ``apiKeyHelper``, also drops the raw
+    ``ANTHROPIC_API_KEY``: seeing both opens Claude Code's "Detected a custom
+    API key" menu, whose selected row uses the same ``❯`` glyph the tmux
+    delivery path waits for, so the first web message is typed into the menu.
 
     :param claude_config: The resolved native launch config, or ``None``
-        (Claude's own login) — which strips only the Databricks profile.
+        (Claude's own login) — which still strips the nested-session marker.
     :returns: The env var names to unset, e.g.
-        ``["DATABRICKS_CONFIG_PROFILE", "ANTHROPIC_API_KEY", "CLAUDECODE"]``.
+        ``["DATABRICKS_CONFIG_PROFILE", "CLAUDECODE", "ANTHROPIC_API_KEY"]``.
     """
-    env_unset = ["DATABRICKS_CONFIG_PROFILE"]
+    env_unset = ["DATABRICKS_CONFIG_PROFILE", "CLAUDECODE"]
     if claude_config is not None and claude_config.api_key_helper:
-        env_unset.extend(("ANTHROPIC_API_KEY", "CLAUDECODE"))
+        env_unset.append("ANTHROPIC_API_KEY")
     return env_unset
 
 

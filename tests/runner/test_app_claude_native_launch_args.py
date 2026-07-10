@@ -166,21 +166,26 @@ def test_claude_terminal_env_unset_masks_key_with_api_key_helper() -> None:
     assert "DATABRICKS_CONFIG_PROFILE" in env_unset
 
 
-def test_claude_terminal_env_unset_without_helper_keeps_only_profile() -> None:
-    """No apiKeyHelper → only the Databricks profile is stripped.
+def test_claude_terminal_env_unset_without_helper_keeps_key() -> None:
+    """No apiKeyHelper preserves the raw key but strips nested-session state.
 
-    Claude's own-login path (``None`` config) and a Bedrock-style config
-    (credential via env, no ``apiKeyHelper``) carry no raw key to shadow,
-    so the key/nested-session strip must not apply — dropping ``CLAUDECODE``
-    there would be gratuitous.
+    Claude's own-login path (``None`` config) and a Bedrock-style config have
+    no ``apiKeyHelper``, so this helper does not strip ``ANTHROPIC_API_KEY``.
+    ``CLAUDECODE`` must still be absent because Claude Code rejects nested
+    launches in every auth mode.
     """
-    assert _claude_terminal_env_unset(None) == ["DATABRICKS_CONFIG_PROFILE"]
+    expected = ["DATABRICKS_CONFIG_PROFILE", "CLAUDECODE"]
+    own_login_env_unset = _claude_terminal_env_unset(None)
+    assert own_login_env_unset == expected
+    assert "ANTHROPIC_API_KEY" not in own_login_env_unset
     bedrock_like = ClaudeNativeUcodeConfig(
         env={"ANTHROPIC_BEDROCK_BASE_URL": "https://bedrock.example"},
         api_key_helper=None,
         model="us.anthropic.claude-opus-4-5-20251101-v1:0",
     )
-    assert _claude_terminal_env_unset(bedrock_like) == ["DATABRICKS_CONFIG_PROFILE"]
+    bedrock_env_unset = _claude_terminal_env_unset(bedrock_like)
+    assert bedrock_env_unset == expected
+    assert "ANTHROPIC_API_KEY" not in bedrock_env_unset
 
 
 def test_native_launch_passes_synthesized_model_as_flag() -> None:
