@@ -28,6 +28,7 @@ import httpx
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
 from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.harness_bench.profile import BenchProfile
+from tests.harness_bench.runtime_env import bench_creds_skip_reason, resolve_bench_env
 
 
 class ProvisioningError(RuntimeError):
@@ -208,6 +209,14 @@ class TurnResult:
     :param error: The error payload from ``response.failed``, if any.
     :param timed_out: Whether the stream did not reach a terminal event
         within the probe's timeout.
+    :param total_tokens: Cumulative token count the turn reported, if any
+        (``None`` when the transport surfaced no usage). Read from the session
+        snapshot (``SessionResponse.last_total_tokens``) or the completed
+        turn's ``usage``.
+    :param total_cost_usd: Cumulative USD cost the turn reported, if any
+        (``None`` when unobserved or the model is unpriced). Read from
+        ``SessionResponse.total_cost_usd`` / ``session.usage`` /
+        ``response.completed`` usage.
     """
 
     events: list[dict[str, Any]] = field(default_factory=list)
@@ -222,6 +231,8 @@ class TurnResult:
     failed: bool = False
     error: Any = None
     timed_out: bool = False
+    total_tokens: int | None = None
+    total_cost_usd: float | None = None
 
     @property
     def reached_terminal(self) -> bool:
@@ -232,6 +243,24 @@ class TurnResult:
     def event_types(self) -> list[str]:
         """The ``type`` of every event, in order."""
         return [e.get("type", "") for e in self.events]
+
+
+def fill_snapshot_cost(result: TurnResult, snapshot: dict[str, Any]) -> None:
+    """Populate *result*'s usage/cost from a session snapshot (``SessionResponse``).
+
+    The server tracks cumulative usage on the conversation and exposes it on the
+    snapshot as ``total_cost_usd`` (priced spend; ``None`` for an unpriced model)
+    and ``last_total_tokens`` (token count). Both server-backed drivers poll the
+    snapshot to a terminal state, so this is the uniform cost read point. A
+    tokens-only snapshot (no price) leaves ``total_cost_usd`` ``None`` — the cost
+    probe reports that as PARTIAL, not a failure.
+    """
+    tokens = snapshot.get("last_total_tokens")
+    if isinstance(tokens, int):
+        result.total_tokens = tokens
+    cost = snapshot.get("total_cost_usd")
+    if isinstance(cost, (int, float)):
+        result.total_cost_usd = float(cost)
 
 
 class SdkInprocDriver:
@@ -248,7 +277,7 @@ class SdkInprocDriver:
 
     transport = "sdk-inproc"
 
-    def __init__(self, profile: BenchProfile, *, databricks_profile: str) -> None:
+    def __init__(self, profile: BenchProfile, *, databricks_profile: str | None) -> None:
         self._profile = profile
         self._databricks_profile = databricks_profile
         self._pm: HarnessProcessManager | None = None
@@ -259,20 +288,22 @@ class SdkInprocDriver:
     def unavailable(profile: BenchProfile, *, databricks_profile: str | None) -> str | None:
         """Return a skip reason if this driver cannot run *profile*, else ``None``.
 
-        Checks, in order: the profile's transport matches this driver, a
-        supplied Databricks profile (no gateway route without one), and a
-        runnable harness CLI binary. Mirrors the e2e suite's gating so the
-        bench skips — rather than errors — in environments missing creds or
-        a vendor CLI, or when a profile declares a transport this driver
-        does not implement (e.g. a native/community harness).
+        Checks, in order: the profile's transport matches this driver,
+        resolvable gateway credentials (``--profile``, a configured
+        ``~/.omnigent`` profile, or ambient ``OPENAI_*`` — like ``omni run``),
+        and a runnable harness CLI binary. Mirrors the e2e suite's gating so the
+        bench skips — rather than errors — in environments missing creds or a
+        vendor CLI, or when a profile declares a transport this driver does not
+        implement (e.g. a native/community harness).
         """
         if profile.transport != SdkInprocDriver.transport:
             return (
                 f"transport {profile.transport!r} not supported by the "
                 f"{SdkInprocDriver.transport!r} driver"
             )
-        if not databricks_profile:
-            return "no --profile / databricks profile provided; live probes need a gateway route"
+        creds_skip = bench_creds_skip_reason(databricks_profile)
+        if creds_skip is not None:
+            return creds_skip
         if profile.cli_binary is not None:
             reason = cli_unavailable_reason(profile.cli_binary)
             if reason is not None:
@@ -285,15 +316,17 @@ class SdkInprocDriver:
         self._pm = HarnessProcessManager(tmp_parent=self._tmp_parent)
         await self._pm.start()
         p = self._profile
-        self._client = await self._pm.get_client(
-            _CONV_ID,
-            p.harness,
-            env={
-                f"{p.env_prefix}GATEWAY": "true",
-                f"{p.env_prefix}DATABRICKS_PROFILE": self._databricks_profile,
-                f"{p.env_prefix}MODEL": p.model,
-            },
-        )
+        # Resolve the effective profile the way `omni run` does (the --profile
+        # override, else the config-derived one). May be None when auth comes
+        # from ambient OPENAI_*, in which case the wrap inherits that env.
+        resolved = resolve_bench_env(self._databricks_profile)
+        wrap_env = {
+            f"{p.env_prefix}GATEWAY": "true",
+            f"{p.env_prefix}MODEL": p.model,
+        }
+        if resolved.db_profile:
+            wrap_env[f"{p.env_prefix}DATABRICKS_PROFILE"] = resolved.db_profile
+        self._client = await self._pm.get_client(_CONV_ID, p.harness, env=wrap_env)
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -486,6 +519,16 @@ class SdkInprocDriver:
                                 result.tool_call_denied = True
                     elif etype == "response.completed":
                         result.completed = True
+                        # The wrap-direct path has no server snapshot; usage, if
+                        # the wrap forwards it, rides on the completed response.
+                        # Absent -> stays None and the cost probe SKIPs.
+                        usage = (event.get("response") or {}).get("usage") or {}
+                        tok = usage.get("total_tokens")
+                        if isinstance(tok, int):
+                            result.total_tokens = tok
+                        cost = usage.get("cost_usd")
+                        if isinstance(cost, (int, float)):
+                            result.total_cost_usd = float(cost)
                     elif etype == "response.cancelled":
                         result.cancelled = True
                     elif etype == "response.failed":
