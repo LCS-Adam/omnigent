@@ -221,10 +221,12 @@ class TurnResult:
         turn — the signal an ASK policy fired (server publishes
         ``response.elicitation_request`` / lands a pending elicitation on the
         snapshot). The policy_ask probe keys on this.
-    :param tool_call_allowed: Whether a surfaced tool call actually proceeded
-        (dispatched + a result delivered) rather than being blocked — the
-        signal an ALLOW policy let the call through. The policy_allow probe
-        keys on this.
+    :param tool_call_allowed: Whether a surfaced tool call produced a
+        non-blocked ``function_call_output`` — i.e. the call proceeded. This is
+        set for *any* non-blocked tool output, not only under an ALLOW policy;
+        the policy_allow probe's correctness comes from driving a real
+        ``action=allow`` session (``_ensure_policy_session("allow")``), so a set
+        flag there means the ALLOW policy let the call through.
     """
 
     events: list[dict[str, Any]] = field(default_factory=list)

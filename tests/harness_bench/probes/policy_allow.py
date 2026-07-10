@@ -1,16 +1,8 @@
 """Policy-ALLOW probe — does an explicit ALLOW policy let a tool call through?
 
-The DENY probe proves a policy can *block* a call; this proves the other side of
-the verdict axis: with an explicit ``allow`` policy baked on the tool_call phase,
-a provoked tool call should *proceed* (dispatched + a result delivered), not be
-blocked. Absence of a deny is not the same as an asserted ALLOW — this drives a
-real ``action=allow`` policy so the allow path is exercised, not merely defaulted.
-
-Observability mirrors the DENY probe: full-server bakes the policy in the agent
-spec and observes a non-blocked ``function_call_output`` (``tool_call_allowed``);
-the wrap-direct and native transports have no server-side policy surface for this
-yet, so they return an unmeasured result and the probe SKIPs — never a false
-verdict.
+Drives a real ``action=allow`` tool_call policy (not mere absence of a deny) and
+checks the call proceeded. Full-server observes a non-blocked output; transports
+with no server-side policy surface return unmeasured and the probe SKIPs.
 """
 
 from __future__ import annotations
@@ -49,9 +41,6 @@ class PolicyAllowProbe(CapabilityProbe):
         if result.timed_out:
             return ProbeResult(Verdict.SKIPPED, note="allow-policy turn timed out", detail=detail)
         if not result.tool_calls and not result.completed:
-            # An unmeasured result (transport with no server-side policy surface
-            # for ALLOW) or a turn where the model never called the tool: the
-            # ALLOW path was not exercised here, so SKIP rather than fail.
             return ProbeResult(
                 Verdict.SKIPPED,
                 note=(
@@ -60,8 +49,6 @@ class PolicyAllowProbe(CapabilityProbe):
                 ),
                 detail=detail,
             )
-        # The turn completed but the tool call did not visibly proceed — not a
-        # clean ALLOW observation; SKIP rather than assert a false UNSUPPORTED.
         return ProbeResult(
             Verdict.SKIPPED,
             note="tool call did not visibly proceed under the ALLOW policy",

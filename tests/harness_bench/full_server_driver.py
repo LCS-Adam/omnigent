@@ -228,17 +228,13 @@ class FullServerDriver:
     # ── policy ALLOW / ASK probe ─────────────────────────────
 
     def policy_probe_turn(self, *, action: str, timeout: float = 180.0) -> TurnResult:
-        """Drive a tool turn under an explicit tool_call policy *action*.
+        """Drive a tool turn under a fixed tool_call policy *action*.
 
-        - ``"allow"``: the agent bakes a fixed ALLOW on the builtin, so the
-          call proceeds; ``_scan_tool_items`` sets ``tool_call_allowed`` from the
-          (non-blocked) ``function_call_output``.
-        - ``"ask"``: the agent bakes a fixed ASK, so the tool_call parks on an
-          elicitation. A background reader watches the SSE stream for
-          ``response.elicitation_request`` (sets ``elicitation_requested`` and
-          captures the ``elicitation_id``), then this method resolves it with an
-          ``approval`` ``accept`` event so the turn can settle rather than park
-          for the (1-day) ASK timeout.
+        ``"allow"``: the call proceeds (``tool_call_allowed`` from the non-blocked
+        output). ``"ask"``: it parks on an elicitation; a background reader sets
+        ``elicitation_requested`` off ``response.elicitation_request`` and this
+        method resolves it (approval accept) so the turn settles instead of
+        parking for the ASK timeout.
         """
         assert self._client is not None
         sid = self._ensure_policy_session(action)
@@ -265,9 +261,13 @@ class FullServerDriver:
                                     if isinstance(eid, str):
                                         elicitation_id["id"] = eid
                                 except (ValueError, TypeError):
-                                    pass
+                                    # Verdict already recorded; unparseable id
+                                    # just means we can't resolve, so the turn
+                                    # parks to the deadline. Note it.
+                                    result.error = "elicitation_request frame had no parseable id"
                                 return
             except httpx.HTTPError:
+                # Best-effort watcher; an SSE read error must not fail the turn.
                 pass
 
         watcher = None
@@ -285,8 +285,6 @@ class FullServerDriver:
         deadline = time.monotonic() + timeout
         seen_running = False
         while time.monotonic() < deadline:
-            # For ASK: once the elicitation is seen, resolve it so the turn
-            # settles instead of parking on the day-long ASK timeout.
             if action == "ask" and result.elicitation_requested and "id" in elicitation_id:
                 self._resolve_elicitation(sid, elicitation_id.pop("id"))
             snap = self._client.get(f"/v1/sessions/{sid}").json()

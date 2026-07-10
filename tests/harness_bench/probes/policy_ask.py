@@ -1,17 +1,9 @@
 """Policy-ASK probe — does an ASK policy raise an elicitation for approval?
 
-The third verdict on the policy axis. With an ``ask`` policy on the tool_call
-phase, a provoked tool call should park for user approval, which omnigent
-surfaces as an elicitation (SSE ``response.elicitation_request`` /
-``pending_elicitations``) — the same signal the web UI renders an approval
-prompt from. The probe drives the ask policy, observes that an elicitation was
-raised (``elicitation_requested``), and the driver resolves it so the turn
-settles instead of parking for the (day-long) ASK timeout.
-
-Observability: full-server bakes the ASK policy in the agent spec and watches
-the session stream for the elicitation request. The wrap-direct and native
-transports have no elicitation surface wired here yet, so they return an
-unmeasured result and the probe SKIPs — never a false verdict.
+Drives an ``action=ask`` tool_call policy and checks the call parked on an
+elicitation (SSE ``response.elicitation_request`` — the same signal the web UI's
+approval prompt uses); the driver resolves it so the turn settles. Full-server
+observes it; transports with no elicitation surface return unmeasured and SKIP.
 """
 
 from __future__ import annotations
@@ -50,8 +42,6 @@ class PolicyAskProbe(CapabilityProbe):
         if result.timed_out:
             return ProbeResult(Verdict.SKIPPED, note="ask-policy turn timed out", detail=detail)
         if not result.tool_calls and not result.completed:
-            # Unmeasured (no elicitation surface on this transport) or the model
-            # never called the tool: the ASK path was not exercised here.
             return ProbeResult(
                 Verdict.SKIPPED,
                 note=(
@@ -60,8 +50,6 @@ class PolicyAskProbe(CapabilityProbe):
                 ),
                 detail=detail,
             )
-        # The tool call resolved without a visible elicitation — not a clean ASK
-        # observation; SKIP rather than assert a false UNSUPPORTED.
         return ProbeResult(
             Verdict.SKIPPED,
             note="tool call did not raise a visible elicitation under the ASK policy",

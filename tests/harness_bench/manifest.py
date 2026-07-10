@@ -80,13 +80,15 @@ _AUTH_PROSE: dict[AuthModel, str] = {
 # CEL unavailable) reports SKIPPED, so SUPPORTED here only ever drifts on a
 # genuine capability gap.
 #
-# cost_tracking is deliberately NOT declared here (left UNKNOWN). It is a P1
-# probe with no backing capability axis, and its observed verdict legitimately
-# varies — SUPPORTED (priced cost), PARTIAL (unpriced model: tokens only), or
-# SKIPPED (transport surfaced no usage). Declaring it SUPPORTED would manufacture
-# false DRIFT against a legitimate PARTIAL; leaving it UNKNOWN lets reconcile pass
-# the observed cell through unchanged (UNKNOWN is not concrete). The P0-coverage
-# test only requires declared verdicts for P0 dimensions, so this is allowed.
+# cost_tracking, policy_allow, and policy_ask are deliberately NOT declared here
+# (left UNKNOWN). Each is a P1 probe with no backing capability axis whose
+# observed verdict legitimately varies by transport / pricing — e.g. cost is
+# SUPPORTED (priced) / PARTIAL (unpriced) / SKIPPED (no usage), and ALLOW/ASK are
+# SUPPORTED only on full-server and SKIPPED where a transport has no policy
+# surface. Declaring any of them SUPPORTED would manufacture false DRIFT against
+# a legitimate PARTIAL/SKIP; leaving them UNKNOWN lets reconcile pass the observed
+# cell through unchanged (UNKNOWN is not concrete). The P0-coverage test only
+# requires declared verdicts for P0 dimensions, so this is allowed.
 _PROBE_ONLY_DECLARED: dict[str, Verdict] = {
     "basic_turn": Verdict.SUPPORTED,
     "tool_calling": Verdict.SUPPORTED,
