@@ -5,6 +5,10 @@ generated at release time from each PR's `## Changelog` section, tagged by the
 PR's `Type of change` (e.g. `[UI]`); the concise, curated highlights live on the
 website under `/releases`.
 
+## [v0.5.1] — 2026-07-10
+
+- [UI] The desktop Browser tab is now hidden on older desktop builds that don't support the embedded browser, instead of showing a tab that does nothing (#2393)
+
 ## [v0.5.0] — 2026-07-10
 
 - [Bug fix] Messaging a long-idle session no longer risks the new turn being killed mid-flight by the idle reaper (#1834)
