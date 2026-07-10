@@ -113,6 +113,8 @@ Each probe drives one real turn and watches what the harness does:
 | **Streaming** | Does the answer arrive incrementally (word-by-word) or all at once at the end? Counts the token-level chunks. |
 | **Tool calling** | Can it use a tool (run a command, read a file) mid-answer, not just chat? |
 | **Policy DENY** | If a policy says "block that tool", does the harness actually enforce it? |
+| **Policy ALLOW** | If a policy explicitly allows the tool, does the call actually go through (not just "wasn't blocked")? |
+| **Policy ASK** | If a policy says "ask first", does the tool call pause for an approval prompt (an elicitation) the way the web UI would show? |
 | **Model override** | If you ask for a specific model, does it actually run that one? |
 | **Cost tracking** | Does a completed turn report what it spent? `✓` a priced USD cost, `~` tokens only (unpriced model), `·` no usage surfaced. Gates any future cost *policy* -- a cost budget is a no-op without this. |
 | **Interrupt** | If you stop it mid-answer, does it actually stop? |
@@ -158,6 +160,8 @@ it was observed at the harness-wrap boundary, below the server.
 | **Streaming** | ✓ = token deltas seen on the server SSE stream | ✓ = token deltas seen on the server SSE stream | ✓ = deltas seen on the wrap SSE (no server) |
 | **Tool calling** | ✓ = a server-dispatched builtin call was made + turn closed | ✓ = the vendor's own tool call surfaced as a server `function_call` item | ✓ = a request-level tool call surfaced at the wrap |
 | **Policy DENY** | ✓ = a spec-baked `tool_call` deny policy blocked the call | ✓ = a session-attached CEL deny fired `response.policy_denied` | `·` = the wrap path has no server-side policy hook |
+| **Policy ALLOW** | ✓ = a spec-baked `allow` policy let the call proceed (non-blocked output) | `·` = CEL allow/ask attach is a follow-up | `·` = no server-side policy hook |
+| **Policy ASK** | ✓ = a spec-baked `ask` policy raised `response.elicitation_request` (then resolved) | `·` = follow-up | `·` = no elicitation surface |
 | **Model override** | ✓ = the requested model was the one used | ✓ = the requested model was the one used | ✓ = the requested model was the one used |
 | **Cost tracking** | ✓/~ = usage read from the session snapshot (`total_cost_usd` / `last_total_tokens`) | ✓/~ = usage from the snapshot (native `session.usage`) | ✓/~ if the wrap forwards `usage` on `response.completed`, else `·` |
 | **Interrupt** | ✓ = a mid-turn cancel stopped the turn (server marker) | ✓ = a mid-turn cancel surfaced `session.interrupted` | ✓ = a mid-turn cancel stopped the wrap turn |
@@ -165,8 +169,11 @@ it was observed at the harness-wrap boundary, below the server.
 So for the harnesses users actually reach through the web UI (SDK on
 `full-server`, natives on `native-tui`), **a ✓ does mean the capability works
 end-to-end through the server API the UI relies on** -- minus the browser render
-layer. The only cell that reads `·` purely for a transport reason is Policy DENY
-under `--fast`; drop `--fast` (the default) and it becomes a real `✓`.
+layer. The cells that read `·` purely for a transport reason are the policy
+verdicts where a transport has no server-side policy surface: Policy DENY under
+`--fast`, and Policy ALLOW / ASK anywhere but `full-server` (their `native-tui`
+attach is a follow-up). On the default SDK run (`full-server`) all three policy
+verdicts are real `✓`.
 
 ### Why a `·` appears
 
@@ -218,10 +225,13 @@ harness-agnostic -- they only call the driver's semantic methods.
 
 ## Scope
 
-Live today: the dimensions in the table above (including `cost_tracking`); all
-three transports (`sdk-inproc`, `full-server`, `native-tui`); the four official
-SDK harnesses (claude-sdk, codex, pi, openai-agents) plus every registered
-native. Tool calling and Policy DENY are observed on `native-tui` too (landed
-separately). Not yet wired (see the design doc's open items): registry-driven
-server-side native-agent seeding, and further dimensions (policy ALLOW/ASK,
-steering, live-queue, resume/fork, elicitation, reasoning, images, compaction).
+Live today: the dimensions in the table above (including `cost_tracking` and
+Policy ALLOW / ASK on `full-server`); all three transports (`sdk-inproc`,
+`full-server`, `native-tui`); the four official SDK harnesses (claude-sdk,
+codex, pi, openai-agents) plus every registered native. Tool calling and Policy
+DENY are observed on `native-tui` too (landed separately). Not yet wired (see
+the design doc's open items): Policy ALLOW / ASK on `native-tui` (a CEL
+allow/ask attach, the way native DENY works), registry-driven server-side
+native-agent seeding, the MCP-tool vs harness-native-tool distinction, and
+further dimensions (steering, live-queue, resume/fork, elicitation, reasoning,
+images, compaction).
