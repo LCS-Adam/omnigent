@@ -2,9 +2,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SharingMode } from "@/lib/capabilities";
 import { authenticatedFetch } from "@/lib/identity";
 
-/** Server-wide sharing policy state from ``GET /v1/sharing-mode`` (admin). */
-export interface SharingModeState {
-  object: "sharing_mode";
+/** Server-wide sharing settings from ``GET /v1/sharing`` (admin). */
+export interface SharingState {
+  object: "sharing";
   sharing_mode: SharingMode;
   /** False when the deployment injects its own mode resolver (not file-backed). */
   editable: boolean;
@@ -16,34 +16,34 @@ export interface SharingModeState {
   public_sharing_editable: boolean;
 }
 
-/** Partial update for ``PUT /v1/sharing-mode`` — set either or both. */
-export interface SharingSettingsUpdate {
+/** Partial update for ``PUT /v1/sharing`` — set either or both. */
+export interface SharingUpdate {
   sharing_mode?: SharingMode;
   public_sharing?: boolean;
 }
 
-const QUERY_KEY = ["sharing-mode"];
+const QUERY_KEY = ["sharing"];
 
-async function fetchSharingMode(): Promise<SharingModeState> {
-  const res = await authenticatedFetch("/v1/sharing-mode");
+async function fetchSharing(): Promise<SharingState> {
+  const res = await authenticatedFetch("/v1/sharing");
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body?.error?.message ?? `${res.status} ${res.statusText}`);
   }
-  return (await res.json()) as SharingModeState;
+  return (await res.json()) as SharingState;
 }
 
-/** Fetch the current server-wide sharing mode (admin only). */
-export function useSharingMode() {
-  return useQuery({ queryKey: QUERY_KEY, queryFn: fetchSharingMode, staleTime: 5_000 });
+/** Fetch the current server-wide sharing settings (admin only). */
+export function useSharing() {
+  return useQuery({ queryKey: QUERY_KEY, queryFn: fetchSharing, staleTime: 5_000 });
 }
 
-/** PUT /v1/sharing-mode — update the mode and/or public-access setting (admin). */
-export function useSetSharingMode() {
+/** PUT /v1/sharing — update the mode and/or public-access setting (admin). */
+export function useSetSharing() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (update: SharingSettingsUpdate) => {
-      const res = await authenticatedFetch("/v1/sharing-mode", {
+    mutationFn: async (update: SharingUpdate) => {
+      const res = await authenticatedFetch("/v1/sharing", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(update),
@@ -52,7 +52,7 @@ export function useSetSharingMode() {
         const body = await res.json().catch(() => ({}));
         throw new Error(body?.error?.message ?? `${res.status} ${res.statusText}`);
       }
-      return (await res.json()) as SharingModeState;
+      return (await res.json()) as SharingState;
     },
     onSuccess: (data) => {
       // Reflect the new value immediately, then revalidate.

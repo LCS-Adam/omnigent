@@ -16,7 +16,7 @@ import type { SharingMode } from "@/lib/capabilities";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { getCurrentIsAdmin, resolveIdentity } from "@/lib/identity";
 import { cn } from "@/lib/utils";
-import { useSetSharingMode, useSharingMode } from "@/hooks/useSharingMode";
+import { useSetSharing, useSharing } from "@/hooks/useSharing";
 
 /** The four tiers, most-permissive first, with human-readable copy. */
 const TIERS: { id: SharingMode; label: string; description: string }[] = [
@@ -57,8 +57,8 @@ export function SharingPage() {
     info.server_version !== null;
   const [meIsAdmin, setMeIsAdmin] = useState<boolean | null>(null);
 
-  const { data: state, isLoading } = useSharingMode();
-  const setMode = useSetSharingMode();
+  const { data: state, isLoading } = useSharing();
+  const setMode = useSetSharing();
   const [error, setError] = useState<string | null>(null);
 
   // Admin probe via the mode-agnostic `/v1/me` identity (works under OIDC

@@ -115,27 +115,41 @@ class SharingMode(str, Enum):
         return cls.ON
 
 
+# Directories whose *direct children* are user home directories, across the
+# Unix / macOS / container layouts a runner might use: ``/home`` (Linux),
+# ``/Users`` (macOS), and ``/var/home`` (ostree — Silverblue/CoreOS/Flatcar,
+# where ``/home`` symlinks here). Matched by path *shape*, never by resolving
+# ``~``: the runner and its home may live on a different host than this server
+# process, so the local process's home is not a reliable signal. Deliberately
+# excludes project-workspace roots (``/workspace``, ``/workspaces/<repo>``) —
+# those hold a single checkout, not a whole home, and stay shareable.
+_HOME_PARENT_DIRS = ("/home", "/Users", "/var/home")
+# Absolute paths that are themselves a home or the filesystem root.
+_BLOCKED_WORKSPACE_ROOTS = ("/", "/root")
+
+
 def workspace_sharing_blocked(workspace: str | None) -> bool:
     """True when a session's working directory is too broad to share under
     :attr:`SharingMode.RESTRICTED_READ_ONLY` — the filesystem root or a user
-    home directory. Such a cwd exposes an entire home/filesystem, so the
-    restricted tier blocks *all* grants on the session (even read).
+    home directory, whose whole contents a grant would expose.
 
-    Recognizes the filesystem root (``/``), the common Unix/macOS home
-    layouts (``/root`` and any direct child of ``/home`` or ``/Users``, e.g.
-    ``/home/alice`` / ``/Users/bob``), and the server's own resolved home
-    (``~``). A subdirectory of a home (``/home/alice/proj``) is shareable; a
-    ``None``/empty workspace (no recorded cwd) is not blocked.
+    Recognizes the filesystem root (``/``), root's home (``/root``), and any
+    direct child of a common home parent (see :data:`_HOME_PARENT_DIRS` — e.g.
+    ``/home/alice``, ``/Users/bob``, ``/var/home/carol``). A subdirectory of a
+    home (``/home/alice/proj``) is shareable, as is a ``None``/empty workspace
+    (no recorded cwd).
+
+    Pattern-based on purpose: the runner (and thus the home the session lives
+    in) may be on a different host than this server process, so only the path
+    shape is reliable — resolving the local ``~`` would test the wrong host.
     """
     if not workspace:
         return False
     path = os.path.normpath(workspace)
-    if path == "/" or path == "/root":
+    if path in _BLOCKED_WORKSPACE_ROOTS:
         return True
-    if path == os.path.normpath(os.path.expanduser("~")):
-        return True
-    parent, _, _leaf = path.rpartition("/")
-    return parent in ("/home", "/Users")
+    parent, _, leaf = path.rpartition("/")
+    return bool(leaf) and parent in _HOME_PARENT_DIRS
 
 
 def env_var_is_truthy(name: str, *, default: bool = False) -> bool:

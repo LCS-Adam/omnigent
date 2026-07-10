@@ -5338,8 +5338,8 @@
         "title": "SetCodexGoalRequest",
         "type": "object"
       },
-      "SetSharingModeRequest": {
-        "description": "Body for `PUT /v1/sharing-mode`.\n\nBoth fields are optional so an admin can update either setting\nindependently; at least one must be present.",
+      "SetSharingRequest": {
+        "description": "Body for `PUT /v1/sharing`.\n\nBoth fields are optional so an admin can update either setting\nindependently; at least one must be present.",
         "properties": {
           "public_sharing": {
             "anyOf": [
@@ -5364,7 +5364,7 @@
             "title": "Sharing Mode"
           }
         },
-        "title": "SetSharingModeRequest",
+        "title": "SetSharingRequest",
         "type": "object"
       },
       "SkillSummary": {
@@ -10844,17 +10844,17 @@
         ]
       }
     },
-    "/v1/sharing-mode": {
+    "/v1/sharing": {
       "get": {
         "description": "Report both settings, whether each is editable here, and the tiers.",
-        "operationId": "get_sharing_mode_v1_sharing_mode_get",
+        "operationId": "get_sharing_v1_sharing_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
                   "additionalProperties": true,
-                  "title": "Response Get Sharing Mode V1 Sharing Mode Get",
+                  "title": "Response Get Sharing V1 Sharing Get",
                   "type": "object"
                 }
               }
@@ -10862,19 +10862,19 @@
             "description": "Successful Response"
           }
         },
-        "summary": "Get Sharing Mode",
+        "summary": "Get Sharing",
         "tags": [
-          "sharing_mode"
+          "sharing"
         ]
       },
       "put": {
         "description": "Set the sharing mode and/or public-access setting (admin only).\n\nUpdates only the fields present in the body; requires at least one.\nRejects an unknown mode value with 400 (no fail-open coercion \u2014 an admin\nsetting a value should learn about a typo). Rejects a write to a setting\nthe deployment manages itself (not file-backed) with 403.",
-        "operationId": "set_sharing_mode_v1_sharing_mode_put",
+        "operationId": "set_sharing_v1_sharing_put",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SetSharingModeRequest"
+                "$ref": "#/components/schemas/SetSharingRequest"
               }
             }
           },
@@ -10886,7 +10886,7 @@
               "application/json": {
                 "schema": {
                   "additionalProperties": true,
-                  "title": "Response Set Sharing Mode V1 Sharing Mode Put",
+                  "title": "Response Set Sharing V1 Sharing Put",
                   "type": "object"
                 }
               }
@@ -10904,9 +10904,9 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Set Sharing Mode",
+        "summary": "Set Sharing",
         "tags": [
-          "sharing_mode"
+          "sharing"
         ]
       }
     }

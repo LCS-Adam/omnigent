@@ -1,8 +1,8 @@
 """Admin route for the server-wide session-sharing policy.
 
-``GET /v1/sharing-mode`` reports two independent settings and whether each is
+``GET /v1/sharing`` reports two independent settings and whether each is
 editable here: the sharing *mode* (the tri-state tier + tier list) and whether
-*public* (anyone-with-the-link) access may be granted. ``PUT /v1/sharing-mode``
+*public* (anyone-with-the-link) access may be granted. ``PUT /v1/sharing``
 sets either or both (admin only), persisting an override file
 (``<data_dir>/sharing_mode`` / ``<data_dir>/public_sharing``) that the grant
 gate and ``GET /v1/info`` read per request.
@@ -40,8 +40,8 @@ _TIERS: tuple[SharingMode, ...] = (
 )
 
 
-class SetSharingModeRequest(BaseModel):
-    """Body for ``PUT /v1/sharing-mode``.
+class SetSharingRequest(BaseModel):
+    """Body for ``PUT /v1/sharing``.
 
     Both fields are optional so an admin can update either setting
     independently; at least one must be present.
@@ -57,7 +57,7 @@ def _state_response(request: Request) -> dict[str, Any]:
     state = request.app.state
     mode: SharingMode = state.sharing_mode()
     return {
-        "object": "sharing_mode",
+        "object": "sharing",
         "sharing_mode": mode.value,
         "editable": bool(getattr(state, "sharing_mode_writable", False)),
         "options": [tier.value for tier in _TIERS],
@@ -84,26 +84,26 @@ async def _require_admin(
     is_admin = await asyncio.to_thread(permission_store.is_admin, user_id)
     if not is_admin:
         raise OmnigentError(
-            "Admin privileges required to manage the sharing mode",
+            "Admin privileges required to manage sharing settings",
             code=ErrorCode.FORBIDDEN,
         )
 
 
-def create_sharing_mode_router(
+def create_sharing_router(
     auth_provider: AuthProvider | None = None,
     permission_store: PermissionStore | None = None,
 ) -> APIRouter:
-    """Build the admin sharing-mode router (mounted under ``/v1``)."""
+    """Build the admin sharing router (mounted under ``/v1``)."""
     router = APIRouter()
 
-    @router.get("/sharing-mode")
-    async def get_sharing_mode(request: Request) -> dict[str, Any]:
+    @router.get("/sharing")
+    async def get_sharing(request: Request) -> dict[str, Any]:
         """Report both settings, whether each is editable here, and the tiers."""
         await _require_admin(request, auth_provider, permission_store)
         return _state_response(request)
 
-    @router.put("/sharing-mode")
-    async def set_sharing_mode(request: Request, body: SetSharingModeRequest) -> dict[str, Any]:
+    @router.put("/sharing")
+    async def set_sharing(request: Request, body: SetSharingRequest) -> dict[str, Any]:
         """Set the sharing mode and/or public-access setting (admin only).
 
         Updates only the fields present in the body; requires at least one.

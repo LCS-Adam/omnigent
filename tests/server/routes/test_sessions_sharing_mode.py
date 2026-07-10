@@ -21,7 +21,6 @@ lifespan) since none of these paths need the runtime.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import httpx
@@ -146,7 +145,7 @@ def _admin_app(
     sharing_mode: SharingMode | object | None = None,
     public_sharing: bool | object | None = None,
 ) -> FastAPI:
-    """Build an app with a seeded admin identity for the sharing-mode routes.
+    """Build an app with a seeded admin identity for the sharing routes.
 
     A ``None`` setting yields the editable file-backed default; a static value
     yields the non-editable (managed) case.
@@ -371,11 +370,11 @@ async def test_revoke_is_unaffected_by_read_only(db_uri: str, tmp_path: Path) ->
         "/root/",  # trailing slash normalized
         "/home/alice",
         "/Users/bob",
-        os.path.expanduser("~"),
+        "/var/home/carol",  # ostree home layout
     ],
 )
 def test_workspace_sharing_blocked_true(workspace: str) -> None:
-    """The filesystem root and user home dirs are blocked."""
+    """The filesystem root and user home dirs are blocked, host-agnostically."""
     assert workspace_sharing_blocked(workspace) is True
 
 
@@ -386,13 +385,16 @@ def test_workspace_sharing_blocked_true(workspace: str) -> None:
         "",
         "/home/alice/project",  # a subdirectory of home is fine
         "/Users/bob/code",
+        "/var/home/carol/repo",
         "/home",  # the parent container itself is not a home dir
+        "/var/home",
+        "/workspaces/omnigent",  # a project checkout, not a home
         "/srv/work",
         "/tmp/session",
     ],
 )
 def test_workspace_sharing_blocked_false(workspace: str | None) -> None:
-    """A subdirectory / arbitrary path (or no cwd) is shareable."""
+    """A subdirectory / project / arbitrary path (or no cwd) is shareable."""
     assert workspace_sharing_blocked(workspace) is False
 
 
@@ -491,7 +493,7 @@ def test_env_default_used_when_no_override(
     assert app.state.sharing_mode() is SharingMode.READ_ONLY
 
 
-# ── Admin route: GET / PUT /v1/sharing-mode ──────────────────────────
+# ── Admin route: GET / PUT /v1/sharing ───────────────────────────────
 
 
 async def test_get_reports_state(
@@ -500,7 +502,7 @@ async def test_get_reports_state(
     monkeypatch.setenv("OMNIGENT_SHARING_MODE", "on")
     app = _admin_app(db_uri, tmp_path)
     async with _client(app, _ADMIN) as c:
-        resp = await c.get("/v1/sharing-mode")
+        resp = await c.get("/v1/sharing")
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["sharing_mode"] == "on"
@@ -513,11 +515,11 @@ async def test_put_sets_mode_and_persists(db_uri: str, tmp_path: Path) -> None:
     resolver all reflect it."""
     app = _admin_app(db_uri, tmp_path)
     async with _client(app, _ADMIN) as c:
-        put = await c.put("/v1/sharing-mode", json={"sharing_mode": "restricted_read_only"})
+        put = await c.put("/v1/sharing", json={"sharing_mode": "restricted_read_only"})
         assert put.status_code == 200, put.text
         assert put.json()["sharing_mode"] == "restricted_read_only"
 
-        assert (await c.get("/v1/sharing-mode")).json()["sharing_mode"] == "restricted_read_only"
+        assert (await c.get("/v1/sharing")).json()["sharing_mode"] == "restricted_read_only"
         assert (await c.get("/v1/info")).json()["sharing_mode"] == "restricted_read_only"
         assert app.state.sharing_mode() is SharingMode.RESTRICTED_READ_ONLY
         assert read_sharing_mode_override() is SharingMode.RESTRICTED_READ_ONLY
@@ -527,7 +529,7 @@ async def test_put_rejects_unknown_value(db_uri: str, tmp_path: Path) -> None:
     """A typo'd tier is a 400 — no silent fail-open coercion on an admin PUT."""
     app = _admin_app(db_uri, tmp_path)
     async with _client(app, _ADMIN) as c:
-        resp = await c.put("/v1/sharing-mode", json={"sharing_mode": "bogus"})
+        resp = await c.put("/v1/sharing", json={"sharing_mode": "bogus"})
         assert resp.status_code == 400, resp.text
         # unchanged: nothing was persisted
         assert read_sharing_mode_override() is None
@@ -537,8 +539,8 @@ async def test_admin_endpoint_requires_admin(db_uri: str, tmp_path: Path) -> Non
     """A non-admin identity is forbidden from reading or writing the mode."""
     app = _admin_app(db_uri, tmp_path)  # only _ADMIN is an admin
     async with _client(app, "intruder@sharing.test") as c:
-        assert (await c.get("/v1/sharing-mode")).status_code == 403
-        put = await c.put("/v1/sharing-mode", json={"sharing_mode": "off"})
+        assert (await c.get("/v1/sharing")).status_code == 403
+        put = await c.put("/v1/sharing", json={"sharing_mode": "off"})
         assert put.status_code == 403, put.text
 
 
@@ -547,8 +549,8 @@ async def test_put_rejected_when_not_writable(db_uri: str, tmp_path: Path) -> No
     rejects writes."""
     app = _admin_app(db_uri, tmp_path, sharing_mode=SharingMode.ON)
     async with _client(app, _ADMIN) as c:
-        assert (await c.get("/v1/sharing-mode")).json()["editable"] is False
-        put = await c.put("/v1/sharing-mode", json={"sharing_mode": "off"})
+        assert (await c.get("/v1/sharing")).json()["editable"] is False
+        put = await c.put("/v1/sharing", json={"sharing_mode": "off"})
         assert put.status_code == 403, put.text
 
 
@@ -556,7 +558,7 @@ async def test_put_requires_a_field(db_uri: str, tmp_path: Path) -> None:
     """An empty body updates nothing and is a 400."""
     app = _admin_app(db_uri, tmp_path)
     async with _client(app, _ADMIN) as c:
-        resp = await c.put("/v1/sharing-mode", json={})
+        resp = await c.put("/v1/sharing", json={})
         assert resp.status_code == 400, resp.text
 
 
@@ -647,7 +649,7 @@ async def test_public_grant_allowed_when_enabled(db_uri: str, tmp_path: Path) ->
 async def test_admin_get_reports_public_state(db_uri: str, tmp_path: Path) -> None:
     app = _admin_app(db_uri, tmp_path)
     async with _client(app, _ADMIN) as c:
-        body = (await c.get("/v1/sharing-mode")).json()
+        body = (await c.get("/v1/sharing")).json()
         assert body["public_sharing_enabled"] is True
         assert body["public_sharing_editable"] is True
 
@@ -666,7 +668,7 @@ async def test_admin_put_disables_public_and_gate_follows(db_uri: str, tmp_path:
         auth_provider=UnifiedAuthProvider(source="header"),
     )
     async with _client(app, _ADMIN) as c:
-        put = await c.put("/v1/sharing-mode", json={"public_sharing": False})
+        put = await c.put("/v1/sharing", json={"public_sharing": False})
         assert put.status_code == 200, put.text
         assert put.json()["public_sharing_enabled"] is False
 
@@ -684,6 +686,6 @@ async def test_admin_put_public_rejected_when_not_writable(db_uri: str, tmp_path
     """A deployment-managed public setting reports not-editable and rejects writes."""
     app = _admin_app(db_uri, tmp_path, public_sharing=True)
     async with _client(app, _ADMIN) as c:
-        assert (await c.get("/v1/sharing-mode")).json()["public_sharing_editable"] is False
-        put = await c.put("/v1/sharing-mode", json={"public_sharing": False})
+        assert (await c.get("/v1/sharing")).json()["public_sharing_editable"] is False
+        put = await c.put("/v1/sharing", json={"public_sharing": False})
         assert put.status_code == 403, put.text

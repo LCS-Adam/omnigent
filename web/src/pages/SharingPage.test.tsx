@@ -1,16 +1,16 @@
-// Tests for the admin SharingPage (server-wide sharing-mode picker).
+// Tests for the admin SharingPage (server-wide sharing-settings picker).
 //
 // Browser e2e is impractical (admin-gated), so the surface is pinned here by
 // mocking the mode-agnostic identity probe (resolveIdentity / getCurrentIsAdmin
-// gate admin) and the react-query sharing-mode hooks, so no QueryClient or
+// gate admin) and the react-query sharing hooks, so no QueryClient or
 // network is needed.
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SharingPage } from "./SharingPage";
 import * as identity from "@/lib/identity";
-import * as sharingHook from "@/hooks/useSharingMode";
-import type { SharingModeState } from "@/hooks/useSharingMode";
+import * as sharingHook from "@/hooks/useSharing";
+import type { SharingState } from "@/hooks/useSharing";
 
 const serverInfoMocks = vi.hoisted(() => ({
   accountsEnabled: true,
@@ -30,16 +30,16 @@ vi.mock("@/lib/identity", () => ({
   resolveIdentity: vi.fn(),
   getCurrentIsAdmin: vi.fn(),
 }));
-vi.mock("@/hooks/useSharingMode", () => ({
-  useSharingMode: vi.fn(),
-  useSetSharingMode: vi.fn(),
+vi.mock("@/hooks/useSharing", () => ({
+  useSharing: vi.fn(),
+  useSetSharing: vi.fn(),
 }));
 
 const setModeMutate = vi.fn();
 
-function state(overrides: Partial<SharingModeState> = {}): SharingModeState {
+function state(overrides: Partial<SharingState> = {}): SharingState {
   return {
-    object: "sharing_mode",
+    object: "sharing",
     sharing_mode: "on",
     editable: true,
     options: ["on", "read_only", "restricted_read_only", "off"],
@@ -49,21 +49,21 @@ function state(overrides: Partial<SharingModeState> = {}): SharingModeState {
   };
 }
 
-function setSharingState(s: SharingModeState | undefined, isLoading = false) {
-  vi.mocked(sharingHook.useSharingMode).mockReturnValue({
+function setSharingState(s: SharingState | undefined, isLoading = false) {
+  vi.mocked(sharingHook.useSharing).mockReturnValue({
     data: s,
     isLoading,
-  } as unknown as ReturnType<typeof sharingHook.useSharingMode>);
+  } as unknown as ReturnType<typeof sharingHook.useSharing>);
 }
 
 beforeEach(() => {
   vi.mocked(identity.resolveIdentity).mockResolvedValue("admin@example.com");
   vi.mocked(identity.getCurrentIsAdmin).mockReturnValue(true);
   setModeMutate.mockReset();
-  vi.mocked(sharingHook.useSetSharingMode).mockReturnValue({
+  vi.mocked(sharingHook.useSetSharing).mockReturnValue({
     mutate: setModeMutate,
     isPending: false,
-  } as unknown as ReturnType<typeof sharingHook.useSetSharingMode>);
+  } as unknown as ReturnType<typeof sharingHook.useSetSharing>);
   serverInfoMocks.accountsEnabled = true;
   serverInfoMocks.loginUrl = null;
   serverInfoMocks.serverVersion = "0.3.0.dev0";

@@ -70,7 +70,7 @@ from omnigent.server.routes.sessions import (
     create_sessions_router,
     set_server_runner_router,
 )
-from omnigent.server.routes.sharing_mode import create_sharing_mode_router
+from omnigent.server.routes.sharing import create_sharing_router
 from omnigent.server.routes.terminal_attach import create_terminal_attach_router
 from omnigent.server.ws_origin import WebSocketOriginMiddleware
 from omnigent.stores import (
@@ -1392,7 +1392,7 @@ def create_app(
 
     admin_list = load_admin_list(extra=frozenset(admins or ()))
     # Session-sharing policy, normalized to a per-request callable, plus a
-    # ``sharing_mode_writable`` flag gating the admin ``PUT /v1/sharing-mode``
+    # ``sharing_mode_writable`` flag gating the admin ``PUT /v1/sharing``
     # endpoint.
     #
     # ``None`` (the OSS default): ``OMNIGENT_SHARING_MODE`` sets the boot
@@ -2090,16 +2090,16 @@ def create_app(
         prefix="/v1",
         tags=["policy_registry"],
     )
-    # Admin control for the server-wide sharing mode. Always mounted (the
+    # Admin control for the server-wide sharing settings. Always mounted (the
     # handlers self-gate on admin); PUT is a no-op-reject unless this server
-    # resolves its mode from the editable file-backed default.
+    # resolves the setting from the editable file-backed default.
     app.include_router(
-        create_sharing_mode_router(
+        create_sharing_router(
             auth_provider=auth_provider,
             permission_store=permission_store,
         ),
         prefix="/v1",
-        tags=["sharing_mode"],
+        tags=["sharing"],
     )
 
     # ── Tunnel lifecycle callbacks (Step 8.5 crash recovery) ───
