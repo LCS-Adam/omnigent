@@ -77,6 +77,13 @@ async def test_ask_supported_when_elicitation_raised() -> None:
     assert r.verdict is Verdict.SUPPORTED
 
 
+async def test_ask_supported_even_if_turn_not_settled() -> None:
+    # The driver returns early once the elicitation fires (verdict decided), so
+    # a real ASK success has elicitation_requested=True but completed=False.
+    r = await _ask(TurnResult(completed=False, elicitation_requested=True))
+    assert r.verdict is Verdict.SUPPORTED
+
+
 async def test_ask_passes_action_ask_to_driver() -> None:
     driver = _Driver(TurnResult(completed=True, elicitation_requested=True))
     await PolicyAskProbe().run(driver, _PROFILE)

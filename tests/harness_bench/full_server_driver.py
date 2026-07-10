@@ -227,14 +227,18 @@ class FullServerDriver:
 
     # ── policy ALLOW / ASK probe ─────────────────────────────
 
-    def policy_probe_turn(self, *, action: str, timeout: float = 180.0) -> TurnResult:
+    def policy_probe_turn(self, *, action: str, timeout: float = 90.0) -> TurnResult:
         """Drive a tool turn under a fixed tool_call policy *action*.
 
         ``"allow"``: the call proceeds (``tool_call_allowed`` from the non-blocked
         output). ``"ask"``: it parks on an elicitation; a background reader sets
-        ``elicitation_requested`` off ``response.elicitation_request`` and this
-        method resolves it (approval accept) so the turn settles instead of
-        parking for the ASK timeout.
+        ``elicitation_requested`` off ``response.elicitation_request``. The ASK
+        verdict is decided the moment that fires, so we resolve the elicitation
+        (approval accept, to leave no dangling park) and return immediately
+        rather than polling the turn to a terminal state.
+
+        The timeout bounds the *worst* case (the model never calls the tool, so
+        no elicitation fires): a bounded SKIP, not a 3-minute stall.
         """
         assert self._client is not None
         sid = self._ensure_policy_session(action)
@@ -285,8 +289,12 @@ class FullServerDriver:
         deadline = time.monotonic() + timeout
         seen_running = False
         while time.monotonic() < deadline:
-            if action == "ask" and result.elicitation_requested and "id" in elicitation_id:
-                self._resolve_elicitation(sid, elicitation_id.pop("id"))
+            # ASK verdict is decided once the elicitation fires: resolve it (so
+            # no park dangles) and stop — no need to poll the turn to idle.
+            if action == "ask" and result.elicitation_requested:
+                if "id" in elicitation_id:
+                    self._resolve_elicitation(sid, elicitation_id.pop("id"))
+                break
             snap = self._client.get(f"/v1/sessions/{sid}").json()
             status = snap.get("status")
             items = snap.get("items", [])
