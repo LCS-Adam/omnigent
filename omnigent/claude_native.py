@@ -323,9 +323,8 @@ def build_native_claude_terminal_env(
         terminal_env[_CLAUDE_CODE_ENABLE_TOOL_SEARCH_ENV] = "true"
         terminal_env[_CLAUDE_CODE_DISABLE_AGENT_VIEW_ENV] = "1"
     # On the apiKeyHelper path the credential reaches Claude Code via the
-    # helper; a raw ANTHROPIC_API_KEY in the terminal env re-triggers Claude
-    # Code's "Detected a custom API key" menu, which hangs the tmux delivery
-    # path. Fail loud if a future change ever emits the raw key here.
+    # helper; a raw ANTHROPIC_API_KEY here re-triggers Claude Code's "Detected a
+    # custom API key" menu, which hangs tmux delivery. Fail loud if one leaks.
     if claude_config is not None and claude_config.api_key_helper:
         if _ANTHROPIC_API_KEY_ENV in terminal_env:
             raise RuntimeError(

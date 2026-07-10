@@ -5103,14 +5103,12 @@ def _claude_terminal_env_unset(
     resolve auth against the wrong workspace.
 
     When the launch config carries an ``apiKeyHelper``, also drops the raw
-    ``ANTHROPIC_API_KEY`` and ``CLAUDECODE``: the runner forwards the key as
-    a harness credential, and Claude Code — seeing both a raw key and the
-    helper — opens its "Detected a custom API key" confirmation menu, whose
-    selected row uses the same ``❯`` glyph the tmux delivery path waits for.
-    The first web message is then typed into the menu, not the chat
-    composer, so no turn starts. ``CLAUDECODE`` is stripped alongside it so
-    the child doesn't report a nested-session error, mirroring the
-    claude-sdk executor's spawn.
+    ``ANTHROPIC_API_KEY`` and ``CLAUDECODE``. Claude Code — seeing both a raw
+    key and the helper — opens its "Detected a custom API key" menu, whose
+    selected row uses the same ``❯`` glyph the tmux delivery path waits for, so
+    the first web message is typed into the menu and no turn starts.
+    ``CLAUDECODE`` is stripped alongside it to avoid a nested-session error,
+    mirroring the claude-sdk executor's spawn.
 
     :param claude_config: The resolved native launch config, or ``None``
         (Claude's own login) — which strips only the Databricks profile.
@@ -5772,19 +5770,14 @@ async def _auto_create_claude_terminal(
         # etc.) when derived. Empty provider config still forces
         # ENABLE_TOOL_SEARCH=true so MCP schemas are loaded on demand.
         env=build_native_claude_terminal_env(claude_config),
-        # Strip the ambient Databricks-SDK profile selection (and, on the
-        # apiKeyHelper path, the raw Anthropic key / nested-session marker —
-        # see above). Claude's MCP servers inherit this env, and several
-        # construct ``WorkspaceClient`` without pinning ``auth_type``; when
-        # ``DATABRICKS_CONFIG_PROFILE`` is set, the SDK's auth resolver picks
-        # up that profile's cached OAuth token and ignores the explicit token
-        # the MCP was configured with — sending a bearer minted for the wrong
-        # workspace and getting back a 400 ``Invalid Token`` from the right
-        # one. Claude itself doesn't read this env var (provider routing is
-        # via ``ANTHROPIC_BASE_URL`` / ``apiKeyHelper``), so dropping it from
-        # the terminal env affects only the leak path. MCPs that genuinely
-        # need a specific profile must declare it in their own per-MCP env
-        # configuration rather than inheriting it from the runner.
+        # Names to strip (see ``_claude_terminal_env_unset``). Dropping
+        # ``DATABRICKS_CONFIG_PROFILE`` matters because Claude's MCP servers
+        # inherit this env and several build ``WorkspaceClient`` without pinning
+        # ``auth_type``: a set profile makes the SDK prefer that profile's cached
+        # OAuth token over the MCP's explicit token, 400ing against the wrong
+        # workspace. Claude itself ignores the var (routing is
+        # ``ANTHROPIC_BASE_URL`` / ``apiKeyHelper``), so this affects only MCPs;
+        # ones needing a specific profile must set it in their own per-MCP env.
         env_unset=claude_terminal_env_unset,
         scrollback=50000,
         # Keep the private tmux server alive if the `claude` CLI exits (e.g. a

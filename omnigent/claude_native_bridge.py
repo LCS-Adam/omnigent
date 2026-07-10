@@ -124,10 +124,9 @@ _TMUX_SEND_TIMEOUT_S = 5.0
 # The glyph persists while Claude is busy responding, so its presence
 # means "input box mounted" (not "idle"), which is what injection needs.
 _CLAUDE_PROMPT_GLYPH = "❯"
-# A selected numbered menu row, e.g. ``❯ 2. No (recommended)`` in Claude
-# Code's startup "Detected a custom API key" confirmation. The glyph is the
-# same one the chat input uses, so the readiness scan must exclude these rows
-# — a chat prompt never renders a numbered choice after the glyph.
+# Matches a selected numbered menu row (``❯ 2. No (recommended)``): the glyph
+# followed by a numbered choice, which the chat input never renders. Used to
+# exclude startup menus from the readiness scan (see ``_is_selected_menu_row``).
 _SELECTED_MENU_ROW_RE = re.compile(rf"{_CLAUDE_PROMPT_GLYPH}\s*\d+\.\s")
 # Box-drawing glyphs Claude Code's input-box frame is made of. A line of
 # these below ``❯`` marks the live input box (see ``_is_box_rule``),
@@ -2934,10 +2933,8 @@ def _claude_prompt_rendered(pane: str) -> bool:
     it's framed by a box rule — the ``────`` closing line the live input
     box always renders below ``❯`` but a bare echoed prompt never has.
 
-    A ``❯`` on a selected numbered menu row (``❯ 2. No (recommended)`` in
-    Claude Code's startup "Detected a custom API key" menu) is NOT the chat
-    input — treating it as ready pastes the first message into the menu. Such
-    rows are excluded from both scans.
+    A ``❯`` on a selected numbered menu row is not the chat input and is
+    excluded from both scans (see :func:`_is_selected_menu_row`).
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: ``True`` when the input box appears mounted.
@@ -2968,11 +2965,10 @@ def _is_selected_menu_row(line: str) -> bool:
 
     Claude Code's startup menus (e.g. the "Detected a custom API key"
     confirmation) mark the highlighted choice with the same ``❯`` glyph the
-    chat input uses, as ``❯ 1. Yes`` / ``❯ 2. No (recommended)``. The
-    readiness scan must not treat such a row as the chat composer, or the
-    first message gets typed into the menu. A chat prompt never renders a
-    numbered choice after the glyph, so the ``<glyph> <digit>.`` shape
-    distinguishes them.
+    chat input uses (``❯ 2. No (recommended)``). The readiness scan must not
+    treat such a row as the chat composer, or the first message gets typed
+    into the menu. A chat prompt never renders a numbered choice after the
+    glyph, so the ``<glyph> <digit>.`` shape distinguishes them.
 
     :param line: A single pane line, e.g. ``"❯ 2. No (recommended)"``.
     :returns: ``True`` when the line is a selected numbered menu choice.

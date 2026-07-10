@@ -404,10 +404,9 @@ _RUNNER_ENV_ALLOWLIST_PREFIXES: tuple[str, ...] = ("LC_", "MLFLOW_", "OTEL_", "O
 # present. These are the names the harnesses themselves resolve —
 # ANTHROPIC_* for claude-sdk / pi (claude-code also honors
 # ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL for gateways, and
-# ANTHROPIC_MODEL to pin the gateway-served model — a gateway that does
-# not serve Claude Code's own default model needs the pin, so it must
-# travel with the key/endpoint or native Claude launches model-less,
-# AWS_BEARER_TOKEN_BEDROCK + ANTHROPIC_BEDROCK_BASE_URL for Bedrock mode,
+# ANTHROPIC_MODEL to pin a gateway-served model (must travel with the
+# key/endpoint, else native Claude launches with a default the gateway
+# rejects), AWS_BEARER_TOKEN_BEDROCK + ANTHROPIC_BEDROCK_BASE_URL for Bedrock mode,
 # and CLAUDE_CODE_OAUTH_TOKEN for `claude setup-token` subscription auth),
 # OPENAI_* for codex / openai-agents (CODEX_ACCESS_TOKEN is the codex
 # CLI's headless ChatGPT-workspace credential, minted in the ChatGPT

@@ -181,12 +181,11 @@ def _synthesize_entry(det: DetectedProvider) -> dict[str, object] | None:
                 if env_base_url is not None:
                     base_url = env_base_url[1]
             # An ``ANTHROPIC_API_KEY`` detection honors companion
-            # ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_MODEL`` the same way. An
+            # ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_MODEL`` the same way: an
             # Anthropic-compatible gateway (LiteLLM, …) issues a gateway-scoped
-            # key that 401s against ``api.anthropic.com``, and serves a model
-            # id that is not Claude Code's own default — so both the endpoint
-            # and the model pin must ride the synthesized provider, else native
-            # Claude routes to the real API or launches without ``--model``.
+            # key that 401s against ``api.anthropic.com`` and serves a non-default
+            # model, so both the endpoint and the model pin must ride the entry —
+            # else native Claude routes to the real API or launches model-less.
             elif det.family == ANTHROPIC_FAMILY and env_var in (
                 "ANTHROPIC_API_KEY",
                 "OMNIGENT_ANTHROPIC_API_KEY",

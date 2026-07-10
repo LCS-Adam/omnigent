@@ -139,11 +139,10 @@ def test_synthesize_env_key_anthropic_honors_base_url_and_model(
     """A detected ``ANTHROPIC_API_KEY`` adopts companion base URL + model.
 
     An Anthropic-compatible gateway (LiteLLM, …) issues a gateway-scoped key
-    that 401s against ``api.anthropic.com`` and serves a model id that is not
-    Claude Code's own default. Both the endpoint and the model pin must ride
-    the synthesized provider; otherwise native Claude routes to the real API
-    (auth fail) or launches without ``--model`` (invalid-model). This is the
-    regression guard for that gateway path.
+    that 401s against ``api.anthropic.com`` and serves a non-default model.
+    Both the endpoint and the model pin must ride the synthesized provider;
+    otherwise native Claude routes to the real API (auth fail) or launches
+    without ``--model`` (invalid-model).
     """
     gateway = "https://gateway.example/anthropic"
     monkeypatch.setenv("ANTHROPIC_BASE_URL", gateway)

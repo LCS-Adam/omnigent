@@ -255,9 +255,8 @@ def test_claude_terminal_env_databricks_gateway_helper_path() -> None:
     assert "CLAUDECODE" in env_unset
 
     # The built terminal env preserves the gateway endpoint and never emits a
-    # raw key (routing is via ANTHROPIC_BASE_URL + apiKeyHelper). The Databricks
-    # profile is intentionally absent from the child: it's dropped via
-    # env_unset, not the built env, and Claude routes without it.
+    # raw key (routing is via ANTHROPIC_BASE_URL + apiKeyHelper); the Databricks
+    # profile is dropped via env_unset, not the built env.
     terminal_env = build_native_claude_terminal_env(config)
     assert terminal_env["ANTHROPIC_BASE_URL"] == (
         "https://dbc-example.cloud.databricks.com/anthropic"
