@@ -122,9 +122,7 @@ async def test_browser_tool_strips_prefix_for_every_action() -> None:
     }
     for tool_name, action in expected.items():
         client = _RecordingClient()
-        await _execute_browser_tool(
-            tool_name, {}, server_client=client, conversation_id="conv_x"
-        )
+        await _execute_browser_tool(tool_name, {}, server_client=client, conversation_id="conv_x")
         assert client.calls[0][1]["action"] == action
 
 

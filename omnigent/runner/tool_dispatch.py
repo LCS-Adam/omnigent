@@ -345,8 +345,7 @@ _BROWSER_ACTION_TIMEOUT = httpx.Timeout(60.0, connect=30.0)
 # browser-action await elapses with no renderer result — a clear
 # "is the session open?" message so the LLM gets a clean, actionable error.
 _BROWSER_TIMEOUT_ERROR = (
-    '{"error": "browser action timed out — is the session open in the '
-    'Omnigent desktop app?"}'
+    '{"error": "browser action timed out — is the session open in the Omnigent desktop app?"}'
 )
 
 # Builtin tools the claude-native / codex-native relay advertises to the

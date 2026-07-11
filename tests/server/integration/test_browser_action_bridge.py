@@ -285,9 +285,9 @@ async def test_concurrent_claims_winner_token_is_the_stored_token(
         assert len(losers) == 1
         assert losers[0] == {"claimed": False}
         # The winner's token is exactly what's stored in the registry.
-        assert (
-            sessions_routes._browser_action_claims[action_id] == winners[0]["claim_token"]
-        ), "stored claim token must equal the winner's token"
+        assert sessions_routes._browser_action_claims[action_id] == winners[0]["claim_token"], (
+            "stored claim token must equal the winner's token"
+        )
     finally:
         request_task.cancel()
         # Await the cancellation so no task is left pending; gather with
