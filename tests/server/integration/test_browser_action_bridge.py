@@ -27,7 +27,6 @@ Uses the shared ``client`` fixture (real stores + mock LLM); the
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -254,8 +253,10 @@ async def test_two_concurrent_claims_exactly_one_winner(client: httpx.AsyncClien
         assert losers[0] == {"claimed": False}
     finally:
         request_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await request_task
+        # Await the cancellation so no task is left pending; gather with
+        # return_exceptions swallows the CancelledError (and gives the await an
+        # observable result, unlike a bare `await` the linter flags as no-op).
+        await asyncio.gather(request_task, return_exceptions=True)
 
 
 async def test_concurrent_claims_winner_token_is_the_stored_token(
@@ -289,8 +290,10 @@ async def test_concurrent_claims_winner_token_is_the_stored_token(
         ), "stored claim token must equal the winner's token"
     finally:
         request_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await request_task
+        # Await the cancellation so no task is left pending; gather with
+        # return_exceptions swallows the CancelledError (and gives the await an
+        # observable result, unlike a bare `await` the linter flags as no-op).
+        await asyncio.gather(request_task, return_exceptions=True)
 
 
 async def test_claim_unknown_action_returns_not_claimed(client: httpx.AsyncClient) -> None:
@@ -325,8 +328,10 @@ async def test_result_without_token_rejected(client: httpx.AsyncClient) -> None:
         assert not request_task.done(), "tokenless result wrongly resolved the Future"
     finally:
         request_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await request_task
+        # Await the cancellation so no task is left pending; gather with
+        # return_exceptions swallows the CancelledError (and gives the await an
+        # observable result, unlike a bare `await` the linter flags as no-op).
+        await asyncio.gather(request_task, return_exceptions=True)
 
 
 async def test_result_wrong_token_rejected(client: httpx.AsyncClient) -> None:
@@ -345,8 +350,10 @@ async def test_result_wrong_token_rejected(client: httpx.AsyncClient) -> None:
         assert not request_task.done()
     finally:
         request_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await request_task
+        # Await the cancellation so no task is left pending; gather with
+        # return_exceptions swallows the CancelledError (and gives the await an
+        # observable result, unlike a bare `await` the linter flags as no-op).
+        await asyncio.gather(request_task, return_exceptions=True)
 
 
 async def test_result_wrong_session_rejected(client: httpx.AsyncClient) -> None:
@@ -371,8 +378,10 @@ async def test_result_wrong_session_rejected(client: httpx.AsyncClient) -> None:
         assert not request_task.done(), "cross-session result wrongly resolved A's Future"
     finally:
         request_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await request_task
+        # Await the cancellation so no task is left pending; gather with
+        # return_exceptions swallows the CancelledError (and gives the await an
+        # observable result, unlike a bare `await` the linter flags as no-op).
+        await asyncio.gather(request_task, return_exceptions=True)
 
 
 async def test_second_result_after_done_is_noop(client: httpx.AsyncClient) -> None:
