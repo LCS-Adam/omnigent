@@ -268,8 +268,6 @@ def _build_record(event: object) -> dict[str, Any]:
     params_str: str | None = None
     if fields:
         params_str = json.dumps(fields, default=str)
-        if len(params_str) > 1000:
-            params_str = params_str[:997] + "..."
 
     data: dict[str, Any] = {
         "event_name": type(event).__name__,
