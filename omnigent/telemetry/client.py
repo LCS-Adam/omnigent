@@ -110,16 +110,16 @@ class TelemetryClient:
             try:
                 self._queue.put_nowait(payload)
             except queue.Full:
-                pass  # drop silently
+                pass  # queue full — drop event; telemetry must never block
         except Exception:
-            pass
+            _logger.debug("Telemetry emit failed; dropping event", exc_info=True)
 
     def flush(self) -> None:
         """Block until the queue is empty (used in tests and at shutdown)."""
         try:
             self._queue.join()
         except Exception:
-            pass
+            pass  # best-effort flush; never raise from telemetry
 
     def shutdown(self) -> None:
         """Signal the background thread to stop and wait briefly."""
@@ -129,7 +129,7 @@ class TelemetryClient:
         try:
             self._queue.put_nowait(None)  # poison pill
         except Exception:
-            pass
+            pass  # queue may be full/closed; best-effort shutdown
         if self._thread is not None:
             self._thread.join(timeout=2.0)
 
@@ -156,7 +156,7 @@ class TelemetryClient:
         try:
             self.shutdown()
         except Exception:
-            pass
+            pass  # best-effort shutdown at process exit; telemetry must never disrupt termination
 
     def _consumer(self) -> None:
         """Background thread: drain the queue in batches."""
@@ -217,7 +217,7 @@ class TelemetryClient:
             with urllib.request.urlopen(req, timeout=3) as resp:
                 resp.read()
         except Exception:
-            pass
+            _logger.debug("Telemetry send failed; dropping batch", exc_info=True)
 
 
 # ── Module-level singleton ───────────────────────────────
@@ -246,7 +246,7 @@ def init_client() -> None:
 
         get_installation_id()
     except Exception:
-        pass
+        _logger.debug("Telemetry installation-id prime failed", exc_info=True)
     with _CLIENT_LOCK:
         if _CLIENT is None:
             try:
@@ -270,4 +270,6 @@ def emit(event: object) -> None:
         if client is not None:
             client.emit(event)
     except Exception:
-        pass
+        _logger.debug(
+            "Telemetry emit failed; swallowing to avoid disrupting application", exc_info=True
+        )

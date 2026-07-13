@@ -18,8 +18,8 @@ from omnigent.version import VERSION
 
 _KEY_INSTALLATION_ID = "installation_id"
 _CACHE_LOCK = threading.RLock()
-_INSTALLATION_ID_CACHE: str | None = None
-_CACHE_INITIALIZED = False
+_cache: str | None = None  # in-memory installation ID after first load
+_cache_initialized = False
 
 
 def get_installation_id() -> str | None:
@@ -28,29 +28,29 @@ def get_installation_id() -> str | None:
     Stores at ``_local_data_dir() / "telemetry.json"``.  Returns
     ``None`` on any error — never raises.
     """
-    global _INSTALLATION_ID_CACHE, _CACHE_INITIALIZED
+    global _cache, _cache_initialized
 
-    if _CACHE_INITIALIZED:
-        return _INSTALLATION_ID_CACHE
+    if _cache_initialized:
+        return _cache
 
     try:
         with _CACHE_LOCK:
-            if _CACHE_INITIALIZED:
-                return _INSTALLATION_ID_CACHE
+            if _cache_initialized:
+                return _cache
 
             if loaded := _load_from_disk():
-                _INSTALLATION_ID_CACHE = loaded
-                _CACHE_INITIALIZED = True
+                _cache = loaded
+                _cache_initialized = True
                 return loaded
 
             new_id = str(uuid.uuid4())
             _write_to_disk(new_id)
             # Set after disk write so a disk failure leaves the cache empty.
-            _INSTALLATION_ID_CACHE = new_id
-            _CACHE_INITIALIZED = True
+            _cache = new_id
+            _cache_initialized = True
             return new_id
     except Exception:
-        _CACHE_INITIALIZED = True
+        _cache_initialized = True
         return None
 
 
@@ -96,4 +96,4 @@ def _write_to_disk(installation_id: str) -> None:
         tmp_path.write_text(json.dumps(config), encoding="utf-8")
         tmp_path.replace(path)
     except Exception:
-        pass
+        pass  # best-effort persistence; a missing file just triggers regeneration next run
