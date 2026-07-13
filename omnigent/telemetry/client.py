@@ -183,11 +183,7 @@ class TelemetryClient:
             pending.append(item)
             self._queue.task_done()
 
-            if len(pending) >= _BATCH_SIZE:
-                self._send(pending)
-                pending = []
-                last_flush = time.monotonic()
-            elif time.monotonic() - last_flush >= _BATCH_INTERVAL_S:
+            if len(pending) >= _BATCH_SIZE or time.monotonic() - last_flush >= _BATCH_INTERVAL_S:
                 self._send(pending)
                 pending = []
                 last_flush = time.monotonic()
@@ -243,6 +239,14 @@ def init_client() -> None:
     global _CLIENT
     if is_disabled():
         return
+    # Prime the installation-id cache on startup so later request
+    # handlers do not perform synchronous file I/O on the event loop.
+    try:
+        from omnigent.telemetry.installation_id import get_installation_id
+
+        get_installation_id()
+    except Exception:
+        pass
     with _CLIENT_LOCK:
         if _CLIENT is None:
             try:

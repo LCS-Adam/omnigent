@@ -12584,6 +12584,36 @@ async def _create_session_from_existing_agent(
     except Exception:  # noqa: BLE001 — telemetry label is best-effort
         pass
 
+    # Emit session.created exactly once at creation time.
+    try:
+        import hashlib as _hashlib
+
+        import omnigent.telemetry.installation_id as _tel_installation_id
+        from omnigent.telemetry import emit as _tel_emit
+        from omnigent.telemetry import is_disabled as _tel_disabled2
+        from omnigent.telemetry.events import SessionCreatedEvent as _SessionCreatedEvent
+        from omnigent.telemetry.surface import classify_surface as _classify_surface2
+
+        if not _tel_disabled2():
+            _install_id = _tel_installation_id.get_installation_id()
+            _anon_uid: str | None = None
+            if _install_id is not None and user_id is not None:
+                _anon_uid = _hashlib.sha256(f"{_install_id}:{user_id}".encode()).hexdigest()[:16]
+            _tel_emit(
+                _SessionCreatedEvent(
+                    session_id=conv.id,
+                    agent_id=agent.id,
+                    harness=native_agent.harness if native_agent is not None else None,
+                    surface=_classify_surface2(request.headers.get("user-agent")),
+                    installation_id=_install_id,
+                    anon_user_id=_anon_uid,
+                    is_fork=body.parent_session_id is not None,
+                    is_sub_agent=body.sub_agent_name is not None,
+                )
+            )
+    except Exception:  # noqa: BLE001 — telemetry must not disrupt session creation
+        pass
+
     if body.initial_items:
         runner_client = await _get_runner_client(conv.id, runner_router)
         if runner_client is None:
