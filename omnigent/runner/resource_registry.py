@@ -303,6 +303,15 @@ class SessionResourceRegistry:
         # lifecycle relationship so the runner can decide whether the owning
         # session should fail.
         self._terminal_exit_publisher: Callable[[TerminalExitEvent], None] | None = None
+        # Live ``_handle_terminal_exit`` tasks plus a "a task was scheduled"
+        # signal. A terminal exit hops from the watcher thread onto the loop via
+        # ``call_soon_threadsafe``, so the cleanup task materializes only after
+        # the loop turns. The set keeps a strong reference to the otherwise
+        # fire-and-forget task (so the loop can't drop it mid-flight); the event
+        # lets callers on the loop await that scheduling + completion instead of
+        # polling. Entries self-remove on completion.
+        self._terminal_exit_tasks: set[asyncio.Task[None]] = set()
+        self._terminal_exit_scheduled: asyncio.Event = asyncio.Event()
 
     def set_terminal_activity_publisher(
         self,
@@ -359,6 +368,21 @@ class SessionResourceRegistry:
         :param publisher: Callable receiving a :class:`TerminalExitEvent`.
         """
         self._terminal_exit_publisher = publisher
+
+    async def wait_for_terminal_exit_cleanup(self) -> None:
+        """Await the next scheduled terminal-exit cleanup task to completion.
+
+        A terminal exit hops from the watcher thread onto the loop via
+        ``call_soon_threadsafe``, so the ``_handle_terminal_exit`` task
+        materializes only after the loop turns. Awaiting the "scheduled" event
+        first lets the loop run that scheduling callback; then the tracked task
+        is awaited so the ``session.resource.deleted`` publish (and the harness
+        release it spawns) is observable without polling. Intended for tests
+        that need to synchronize on the fan-out deterministically.
+        """
+        await self._terminal_exit_scheduled.wait()
+        for task in list(self._terminal_exit_tasks):
+            await task
 
     def _set_session_status_memo(self, session_id: str, status: str) -> None:
         """Record the session's latest PTY status for exit classification."""
@@ -1062,6 +1086,9 @@ class SessionResourceRegistry:
                         instance=instance,
                     )
                 )
+                self._terminal_exit_tasks.add(task)
+                self._terminal_exit_scheduled.set()
+                task.add_done_callback(self._terminal_exit_tasks.discard)
                 task.add_done_callback(_log_terminal_exit_task_result)
 
             try:

@@ -11090,31 +11090,35 @@ async def test_required_terminal_exit_while_idle_does_not_fail_session(tmp_path:
         on_exit = callbacks.get("on_exit")
         assert callable(on_exit)
         on_exit()
-        # Terminal-exit cleanup fans out across two independent background
-        # tasks: one publishes the resource events, a second releases the
-        # harness subprocess. Their completion order is not guaranteed, so
-        # settle on BOTH the published ``deleted`` event and the subprocess
-        # release — accumulating drained events each tick — rather than using
-        # the release as a proxy for the publish (which raced: the release
-        # task could finish first, leaving the drain empty).
+        # Terminal-exit cleanup fans out across two background tasks scheduled
+        # onto the loop: ``_handle_terminal_exit`` publishes the resource events
+        # and, from inside that same publish, spawns a second task that releases
+        # the harness subprocess. Await the cleanup deterministically instead of
+        # polling — the registry signals when its cleanup task is scheduled and
+        # exposes it, so awaiting drives the publish (the ``deleted`` event is
+        # enqueued and the release task is created) to completion regardless of
+        # event-loop scheduling. The release task is created synchronously
+        # inside that publish, so once the cleanup task is awaited it is either
+        # already done (``pm.released`` set) or still pending; await any pending
+        # instance so the release is observed by construction, not by a drain.
+        await resource_registry.wait_for_terminal_exit_cleanup()
+        release_task_name = f"required-terminal-release:{conv_id}"
+        pending_release = [
+            task
+            for task in asyncio.all_tasks()
+            if task.get_name() == release_task_name and not task.done()
+        ]
+        if pending_release:
+            await asyncio.gather(*pending_release)
+
         deleted_event = {
             "type": "session.resource.deleted",
             "resource_id": "terminal_worker_main",
             "resource_type": "terminal",
             "session_id": conv_id,
         }
-        queued_events: list[dict[str, Any]] = []
-        parent_events: list[dict[str, Any]] = []
-        for _ in range(1000):
-            queued_events.extend(
-                _drain_session_event_queue(_session_event_queues_ref.get(conv_id))
-            )
-            parent_events.extend(
-                _drain_session_event_queue(_session_event_queues_ref.get(parent_id))
-            )
-            if pm.released and deleted_event in queued_events:
-                break
-            await asyncio.sleep(0)
+        queued_events = _drain_session_event_queue(_session_event_queues_ref.get(conv_id))
+        parent_events = _drain_session_event_queue(_session_event_queues_ref.get(parent_id))
     finally:
         _session_event_queues_ref.pop(conv_id, None)
         _session_event_queues_ref.pop(parent_id, None)
