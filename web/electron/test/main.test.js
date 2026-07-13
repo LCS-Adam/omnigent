@@ -55,3 +55,53 @@ describe("workspace chrome injection wiring (src/main.js)", () => {
     );
   });
 });
+
+// Wiring guards for the window-open policy (src/popupPolicy.js decides,
+// main.js enforces). The policy's BEHAVIOR is unit-tested in
+// popupPolicy.test.js; these guard the enforcement half no behavior test
+// can see: that main.js still routes window.open through the policy, and
+// that an allowed OAuth popup is created HARDENED (no shell preload,
+// sandboxed) and then run through hardenOauthPopup. Losing any of these
+// silently reopens the chromeless-credential-window hole the policy exists
+// to close.
+describe("window-open policy wiring (src/main.js)", () => {
+  it("routes setWindowOpenHandler decisions through decideWindowOpen as live code", () => {
+    assert.match(
+      liveCode,
+      /setWindowOpenHandler\(\s*\(\{\s*url,\s*disposition,\s*features\s*\}\)\s*=>\s*\{[\s\S]{0,200}decideWindowOpen\(/,
+      [
+        "src/main.js no longer passes window.open through decideWindowOpen (src/popupPolicy.js).",
+        "Without the policy, either every popup is denied (OAuth sign-in breaks again — the",
+        "callback needs window.opener + the opener's localStorage) or, worse, popups are",
+        "allowed without the pinned-opener/https/allowlist conditions. Restore the",
+        "decideWindowOpen dispatch; do not inline a weaker check.",
+      ].join(" "),
+    );
+  });
+
+  it("attaches the no-op popup preload and sandbox to allowed popups", () => {
+    assert.match(
+      liveCode,
+      /preload:\s*POPUP_PRELOAD[\s\S]{0,120}sandbox:\s*true/,
+      [
+        "The allowed-popup overrideBrowserWindowOptions no longer force preload: POPUP_PRELOAD",
+        "and sandbox: true. Without them the child window can inherit the SHELL preload",
+        "(omnigentDesktop/omnigentSetup IPC bridges) and run unsandboxed while showing",
+        "third-party sign-in pages. Restore both overrides (see popup_preload.js).",
+      ].join(" "),
+    );
+  });
+
+  it("hardens created popups via did-create-window → hardenOauthPopup as live code", () => {
+    assert.match(
+      liveCode,
+      /did-create-window[\s\S]{0,120}hardenOauthPopup\(/,
+      [
+        "src/main.js no longer runs allowed popups through hardenOauthPopup on",
+        "did-create-window. That call stamps the current host into the popup's title",
+        "(the only origin indicator a chromeless window has), and denies",
+        "popups-from-popups. Re-add the wiring; do not delete this test.",
+      ].join(" "),
+    );
+  });
+});

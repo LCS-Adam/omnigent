@@ -39,6 +39,7 @@ const { createBrowserViewRegistry } = require("./browserViewRegistry");
 const { createBrowserViewBoundsController } = require("./browserViewBounds");
 const { registerBrowserIpc } = require("./browserIpc");
 const { registerSessionExpiryReload } = require("./session-expiry");
+const { decideWindowOpen, WEB_SCHEMES } = require("./popupPolicy");
 const omnigentCli = require("./omnigent_cli");
 const serverManager = require("./server_manager");
 
@@ -67,13 +68,11 @@ const FIND_BAR_INSET = 16;
 const ERR_ABORTED = -3;
 
 /**
- * Schemes that open externally with no confirmation: they land in the
- * user's browser / mail client, which apply their own safety UX. Anything
- * else launches an OS protocol handler (vscode://, ssh://, …) with
- * page-controlled arguments — and `shell.openExternal`, unlike a browser,
- * shows no prompt of its own — so it goes through a consent dialog first.
+ * Absolute path to the deliberately empty preload attached to OAuth popup
+ * child windows, so they never inherit the shell preload's IPC bridges —
+ * see popup_preload.js and hardenOauthPopup.
  */
-const WEB_SCHEMES = new Set(["http:", "https:", "mailto:"]);
+const POPUP_PRELOAD = path.join(__dirname, "popup_preload.js");
 
 /** Absolute path to the app icon (PNG works for the macOS dock at runtime). */
 const ICON_PNG = path.join(__dirname, "..", "icons", "icon.png");
@@ -343,11 +342,17 @@ function registerPermissions() {
  * frame through SSO/IdP origins that can't be known in advance (e.g.
  * ``abc.aws.databricksapps.com`` → an SSO domain that probes a localhost
  * helper), and this is what lets those pages reach localhost while the
- * user is actually on them. The reachable set stays narrow because
- * in-window navigation only starts from the pinned server (links and
- * window.open go to the external browser — see setWindowOpenHandler);
- * unpinned windows (the setup page) confer nothing, and an iframe never
- * matches because this checks the main frame's origin only.
+ * user is actually on them. The reachable set stays narrow because it is
+ * scoped to SHELL windows: this iterates `windows`, and an OAuth popup —
+ * the one window.open the shell allows (see popupPolicy.js) — is a child
+ * window that is never entered there, so nothing a popup shows can match;
+ * links and every other window.open still leave for the external browser.
+ * A popup does keep `window.opener` (the OAuth handshake requires it) and
+ * could therefore navigate a shell window's main frame — the same
+ * transitive-trust class as the SSO redirect chains this model already
+ * accepts, bounded by popup content starting on allowlisted sign-in
+ * hosts. Unpinned windows (the setup page) confer nothing, and an iframe
+ * never matches because this checks the main frame's origin only.
  *
  * @param {string} origin e.g. ``"https://login.example.com"``.
  * @returns {boolean}
@@ -865,6 +870,61 @@ function cascadeIfCovering(win) {
 }
 
 /**
+ * Harden an OAuth popup child window the window-open policy allowed
+ * (popupPolicy.js). The popup deliberately keeps `window.opener` and the
+ * opener's session — that's the whole point (the OAuth callback posts the
+ * authorization code to the opener) — so the hardening addresses what a
+ * chromeless window is missing instead:
+ *
+ *   - Origin visibility: the window title always leads with the CURRENT
+ *     host, refreshed on every navigation. The page controls
+ *     document.title but can never control the prefix, so a user typing
+ *     credentials has an indicator of where they are. (A real URL bar —
+ *     an app-drawn strip view like the find bar — is the planned upgrade.)
+ *   - No popups-from-popups: a window.open from the child leaves the shell
+ *     (external browser); non-web schemes from a third-party page are
+ *     dropped outright — no consent dialog, unlike the shell window, since
+ *     there is no pinned-origin trust to anchor one.
+ *
+ * The child is NEVER entered in `windows`, so nothing it shows can become
+ * a "pinned window's current page" for the localhost trust checks — see
+ * isCurrentWindowOrigin.
+ *
+ * @param {BrowserWindow} child The freshly created popup window.
+ */
+function hardenOauthPopup(child) {
+  const stampTitle = () => {
+    if (child.isDestroyed()) return;
+    let host = "";
+    try {
+      host = new URL(child.webContents.getURL()).host;
+    } catch {
+      // about:blank / early lifecycle — no host to show yet.
+    }
+    const pageTitle = child.webContents.getTitle();
+    child.setTitle(host ? (pageTitle ? `${host} — ${pageTitle}` : host) : pageTitle || "Sign in");
+  };
+  child.webContents.on("page-title-updated", (event) => {
+    event.preventDefault(); // keep the host prefix; we compose the title
+    stampTitle();
+  });
+  child.webContents.on("did-navigate", stampTitle);
+  stampTitle();
+  child.webContents.setWindowOpenHandler(({ url }) => {
+    let scheme = null;
+    try {
+      scheme = new URL(url).protocol;
+    } catch {
+      // Unparseable URL from page content — nothing safe to open.
+    }
+    if (scheme && WEB_SCHEMES.has(scheme)) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
+}
+
+/**
  * Create a shell window and load a destination, in priority order:
  *   1. `targetUrl`, when given (used by "New Window" to clone the current
  *      window's exact URL — e.g. a specific conversation).
@@ -952,23 +1012,52 @@ function createWindow(targetUrl, opts = {}) {
     void win.loadFile(SETUP_PAGE, search.size > 0 ? { search: search.toString() } : undefined);
   }
 
-  // Never spawn chromeless Electron windows: web links open in the user's
-  // real browser, and any other scheme (a custom OS protocol handler like
-  // vscode://) requires explicit user consent first — see WEB_SCHEMES.
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    let scheme = null;
-    try {
-      scheme = new URL(url).protocol;
-    } catch {
-      // Unparseable URL from page content — nothing safe to open.
+  // Page-initiated window.open / target=_blank. Default: leave the shell —
+  // web links open in the user's real browser, non-web schemes get a consent
+  // dialog. Narrow exception: OAuth sign-in popups from the pinned origin to
+  // allowlisted sign-in hosts open as real (hardened) child windows, because
+  // the workspace's OAuth callback hands the authorization code back via
+  // window.opener.postMessage + a localStorage nonce — both exist only in a
+  // same-profile child; in an external browser the code is stranded and the
+  // flow dies. Full conditions in popupPolicy.js; child hardening in
+  // hardenOauthPopup (wired via did-create-window below).
+  win.webContents.setWindowOpenHandler(({ url, disposition, features }) => {
+    const decision = decideWindowOpen(
+      { url, disposition, features },
+      {
+        openerOrigin: originOf(win.webContents.getURL()),
+        pinnedOrigin: pinnedOrigin(win),
+        extraPopupOrigins: loadSettings().popup_allowed_origins,
+      },
+    );
+    if (decision.kind === "popup") {
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: {
+          autoHideMenuBar: true,
+          webPreferences: {
+            // Third-party sign-in pages must not see the shell's IPC
+            // bridges (preload.js) — attach a guaranteed no-op instead of
+            // relying on Electron's inheritance defaults.
+            preload: POPUP_PRELOAD,
+            sandbox: true,
+            contextIsolation: true,
+            nodeIntegration: false,
+          },
+        },
+      };
     }
-    if (scheme && WEB_SCHEMES.has(scheme)) {
+    if (decision.kind === "external") {
       void shell.openExternal(url);
-    } else if (scheme) {
-      void confirmExternalProtocol(win, url, scheme);
+    } else if (decision.kind === "protocol-consent") {
+      void confirmExternalProtocol(win, url, decision.scheme);
     }
+    // "ignore": unparseable URL from page content — nothing safe to open.
     return { action: "deny" };
   });
+
+  // Fires only for window.open the handler above allowed (OAuth popups).
+  win.webContents.on("did-create-window", (child) => hardenOauthPopup(child));
 
   // Server unreachable / DNS failure / TLS error → fall back to the setup
   // page with the failure shown, instead of stranding the user on Chromium's
