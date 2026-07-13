@@ -408,7 +408,7 @@ def test_request_duration_access_formatter_colors_standard_level_name() -> None:
     output = formatter.format(record)
 
     assert re.match(
-        r"\x1b\[32mINFO \x1b\[0m \d{2}-\d{2} \d{2}:\d{2}:\d{2} "
+        r"\x1b\[32mINFO \x1b\[0m \d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} "
         r"\x1b\[34muvicorn\.access\s+\x1b\[0m "
         r"\x1b\[35m-\s+\x1b\[0m \| "
         r'"\x1b\[1mGET /v1/sessions/conv_abc/events HTTP/1\.1\x1b\[0m" '

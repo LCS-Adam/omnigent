@@ -211,6 +211,42 @@ def test_server_uvicorn_log_config_uses_terminal_handler_when_requested(
     ]
 
 
+def test_server_uvicorn_log_config_mirrors_foreground_tty_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Foreground ``omnigent server`` keeps uvicorn access logs on stderr."""
+    monkeypatch.delenv("OMNIGENT_LOG_TO_STDERR", raising=False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+
+    log_config = _server_uvicorn_log_config(tmp_path / "server.log")
+
+    assert log_config["loggers"]["uvicorn"]["handlers"] == [
+        "server_terminal",
+        "server_file",
+    ]
+    assert log_config["loggers"]["uvicorn.access"]["handlers"] == [
+        "server_access_terminal",
+        "server_access_file",
+    ]
+
+
+def test_server_uvicorn_log_config_keeps_noninteractive_default_file_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Spawned or redirected servers do not mirror uvicorn logs by default."""
+    monkeypatch.delenv("OMNIGENT_LOG_TO_STDERR", raising=False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: False)
+
+    log_config = _server_uvicorn_log_config(tmp_path / "server.log")
+
+    assert "server_terminal" not in log_config["handlers"]
+    assert "server_access_terminal" not in log_config["handlers"]
+    assert log_config["loggers"]["uvicorn"]["handlers"] == ["server_file"]
+    assert log_config["loggers"]["uvicorn.access"]["handlers"] == ["server_access_file"]
+
+
 def test_server_uvicorn_log_config_standardizes_timestamp_and_color(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -141,7 +141,10 @@ def _server_uvicorn_log_config(
         level_name = logging.getLevelName(effective_log_level())
         if not isinstance(level_name, str):
             level_name = "INFO"
-        mirror = should_log_to_stderr() if log_to_stderr is None else log_to_stderr
+        if log_to_stderr is None:
+            mirror = should_log_to_stderr() or sys.stderr.isatty()
+        else:
+            mirror = log_to_stderr
         log_config["handlers"]["server_file"] = {
             "class": "logging.FileHandler",
             "formatter": "default_file",
