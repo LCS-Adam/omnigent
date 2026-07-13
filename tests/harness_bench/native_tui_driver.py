@@ -34,6 +34,7 @@ from tests._helpers.live_server import find_free_port
 from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.harness_bench.driver import ProvisioningError, TurnResult, fill_snapshot_cost
 from tests.harness_bench.full_server import spawn_omnigent_server
+from tests.harness_bench.mcp_tools import is_target_omnigent_mcp_tool
 from tests.harness_bench.profile import BenchProfile
 from tests.harness_bench.runtime_env import (
     BenchRuntimeEnv,
@@ -149,7 +150,6 @@ _NATIVE_OMNIGENT_MCP_HARNESSES = frozenset(
         "qwen-native",
     }
 )
-_MCP_TOOL_NAME = "sys_session_list"
 _MCP_TOOL_PROMPT = (
     "You must call the omnigent MCP tool mcp__omnigent__sys_session_list exactly once. "
     "It may be displayed as sys_session_list by your client. Do not use a shell or any "
@@ -607,9 +607,7 @@ class NativeTuiDriver:
             calls_before = len(result.tool_calls)
             self._post_message(prompt)
             self._poll_new_tool_calls(baseline, result, timeout=timeout)
-            if any(
-                str(call.get("name") or "").endswith(_MCP_TOOL_NAME) for call in result.tool_calls
-            ):
+            if any(is_target_omnigent_mcp_tool(call.get("name")) for call in result.tool_calls):
                 result.completed = True
                 break
             baseline += len(result.tool_calls) - calls_before

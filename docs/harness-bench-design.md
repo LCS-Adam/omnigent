@@ -413,6 +413,10 @@ agree with it.
 
 ## Open items
 
+- **Declarative native tool-relay mechanism** — extend the harness capability
+  model to distinguish generated MCP, native registration, and no relay. Derive
+  the Omnigent MCP probe's applicability from that declaration instead of the
+  bench's temporary `_NATIVE_OMNIGENT_MCP_HARNESSES` list.
 - **Registry-driven native-agent seeding** — replace the hardcoded server
   seeding list with registry iteration so community native harnesses work end
   to end after plugin installation.

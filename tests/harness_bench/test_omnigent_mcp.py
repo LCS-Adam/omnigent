@@ -33,6 +33,24 @@ async def test_supported_for_prefixed_omnigent_tool_call() -> None:
     assert result.verdict is Verdict.SUPPORTED
 
 
+async def test_supported_for_bare_omnigent_tool_call() -> None:
+    result = await OmnigentMcpProbe().run(
+        _Driver(TurnResult(tool_calls=[{"name": "sys_session_list"}])),
+        _PROFILE,
+    )
+
+    assert result.verdict is Verdict.SUPPORTED
+
+
+async def test_skipped_for_unrelated_suffix_match() -> None:
+    result = await OmnigentMcpProbe().run(
+        _Driver(TurnResult(tool_calls=[{"name": "other_sys_session_list"}])),
+        _PROFILE,
+    )
+
+    assert result.verdict is Verdict.SKIPPED
+
+
 async def test_skipped_when_native_has_no_mcp_bridge() -> None:
     result = await OmnigentMcpProbe().run(
         _Driver(TurnResult(error="'pi-native' has no Omnigent MCP bridge")),

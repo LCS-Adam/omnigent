@@ -314,6 +314,16 @@ def test_mcp_tool_turn_observes_prefixed_omnigent_tool() -> None:
     assert "mcp__omnigent__sys_session_list" in str(client.posted_events[-1])
 
 
+def test_mcp_tool_turn_rejects_unrelated_suffix_match() -> None:
+    client = _FakeClient(items=[_function_call_item("other_sys_session_list")])
+    driver = _driver_with_fake("claude-native", client)
+
+    result = driver._drive_mcp_tool_turn(timeout=0.01)
+
+    assert not result.completed
+    assert [call["name"] for call in result.tool_calls] == ["other_sys_session_list"]
+
+
 def test_mcp_tool_turn_retries_when_first_prompt_has_no_call() -> None:
     client = _FakeClient(items=[])
     driver = _driver_with_fake("claude-native", client)

@@ -9,12 +9,14 @@ through the generated ``omnigent`` MCP server.
 from __future__ import annotations
 
 from tests.harness_bench.driver import infra_failure_reason
+from tests.harness_bench.mcp_tools import (
+    TARGET_OMNIGENT_MCP_TOOL,
+    is_target_omnigent_mcp_tool,
+)
 from tests.harness_bench.probes.base import CapabilityProbe
 from tests.harness_bench.profile import BenchProfile
 from tests.harness_bench.transport import Driver
 from tests.harness_bench.verdict import Applicability, Priority, ProbeResult, Verdict
-
-_TARGET_TOOL = "sys_session_list"
 
 
 class OmnigentMcpProbe(CapabilityProbe):
@@ -26,13 +28,13 @@ class OmnigentMcpProbe(CapabilityProbe):
     async def run(self, driver: Driver, profile: BenchProfile) -> ProbeResult:
         result = await driver.run_mcp_tool_turn()
         names = [str(call.get("name") or "") for call in result.tool_calls]
-        matched = [name for name in names if name.endswith(_TARGET_TOOL)]
+        matched = [name for name in names if is_target_omnigent_mcp_tool(name)]
         detail = {"tool_calls": names, "matched_calls": matched, "completed": result.completed}
 
         if matched:
             return ProbeResult(
                 Verdict.SUPPORTED,
-                note=f"called {_TARGET_TOOL} through the Omnigent MCP relay",
+                note=f"called {TARGET_OMNIGENT_MCP_TOOL} through the Omnigent MCP relay",
                 detail=detail,
             )
         infra = infra_failure_reason(result)
@@ -43,11 +45,11 @@ class OmnigentMcpProbe(CapabilityProbe):
         if result.timed_out:
             return ProbeResult(
                 Verdict.SKIPPED,
-                note=f"timed out before calling {_TARGET_TOOL} through Omnigent MCP",
+                note=(f"timed out before calling {TARGET_OMNIGENT_MCP_TOOL} through Omnigent MCP"),
                 detail=detail,
             )
         return ProbeResult(
             Verdict.SKIPPED,
-            note=f"model did not call {_TARGET_TOOL} through the Omnigent MCP relay",
+            note=(f"model did not call {TARGET_OMNIGENT_MCP_TOOL} through the Omnigent MCP relay"),
             detail=detail,
         )
