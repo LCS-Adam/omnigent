@@ -585,7 +585,14 @@ class TestCodexExecutor(unittest.TestCase):
             # to this turn, and turn/start carries no (dropped) effort field.
             self.assertEqual(methods, ["thread/start", "thread/settings/update", "turn/start"])
             settings_params = session._request.await_args_list[1].args[1]
-            self.assertEqual(settings_params, {"threadId": "thread-1", "effort": "high"})
+            self.assertEqual(
+                settings_params,
+                {
+                    "threadId": "thread-1",
+                    "effort": "high",
+                    "summary": "detailed",
+                },
+            )
             turn_params = session._request.await_args_list[2].args[1]
             self.assertNotIn("effort", turn_params)
 

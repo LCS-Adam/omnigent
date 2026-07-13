@@ -65,7 +65,10 @@ _CLAUDE_THINKING_BUDGETS = {
     "low": 1024,
     "medium": 4096,
     "high": 8192,
+    "xhigh": 16384,
+    "max": 32768,
 }
+_CLAUDE_MIN_THINKING_TOKENS = 1024
 
 
 @dataclass
@@ -829,11 +832,14 @@ def _apply_reasoning_request(
     kwargs.pop("reasoning_effort", None)
     if validated is None:
         return
-    if max_tokens <= 1:
-        raise ValueError("Claude extended thinking requires max_tokens greater than 1")
+    if max_tokens < 2 * _CLAUDE_MIN_THINKING_TOKENS:
+        raise ValueError(
+            "Claude extended thinking requires max_tokens of at least 2048 "
+            "to reserve tokens for both thinking and the answer"
+        )
 
-    requested = _CLAUDE_THINKING_BUDGETS.get(validated, max_tokens - 1)
-    budget_tokens = min(requested, max_tokens - 1)
+    requested = _CLAUDE_THINKING_BUDGETS[validated]
+    budget_tokens = min(requested, max_tokens // 2)
     existing_extra_body = kwargs.get("extra_body")
     extra_body = dict(existing_extra_body) if isinstance(existing_extra_body, dict) else {}
     extra_body.setdefault(

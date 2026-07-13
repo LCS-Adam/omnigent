@@ -692,8 +692,8 @@ class TestDatabricksExecutorConfig(unittest.TestCase):
 
         _run(_t())
 
-    def test_claude_thinking_budget_is_below_max_tokens(self):
-        """FMAPI rejects a Claude thinking budget equal to max_tokens."""
+    def test_claude_thinking_budget_reserves_half_for_answer(self):
+        """A mapped thinking budget leaves at least half the output for the answer."""
 
         async def _t():
             client = FakeClient(_make_text_stream("ok"))
@@ -707,14 +707,73 @@ class TestDatabricksExecutorConfig(unittest.TestCase):
                     "",
                     config=ExecutorConfig(
                         model="system.ai.claude-sonnet-4-5",
-                        max_tokens=1024,
+                        max_tokens=4096,
                         extra={"reasoning_effort": "high"},
                     ),
                 )
             ]
 
             thinking = client.chat.completions.last_kwargs["extra_body"]["thinking"]
-            self.assertEqual(thinking["budget_tokens"], 1023)
+            self.assertEqual(thinking["budget_tokens"], 2048)
+
+        _run(_t())
+
+    def test_claude_xhigh_and_max_use_bounded_budgets(self):
+        """The largest efforts must not consume the entire output allowance."""
+
+        async def _t():
+            observed: dict[str, int] = {}
+            for effort in ("xhigh", "max"):
+                client = FakeClient(_make_text_stream("ok"))
+                executor = DatabricksExecutor(client=client)
+
+                [
+                    event
+                    async for event in executor.run_turn(
+                        [],
+                        [],
+                        "",
+                        config=ExecutorConfig(
+                            model="databricks-claude-sonnet-4-6",
+                            max_tokens=100000,
+                            extra={"reasoning_effort": effort},
+                        ),
+                    )
+                ]
+                observed[effort] = client.chat.completions.last_kwargs["extra_body"]["thinking"][
+                    "budget_tokens"
+                ]
+
+            self.assertEqual(observed, {"xhigh": 16384, "max": 32768})
+
+        _run(_t())
+
+    def test_claude_rejects_output_window_too_small_for_thinking(self):
+        """Claude thinking requires room for its minimum budget and an answer."""
+
+        async def _t():
+            client = FakeClient(_make_text_stream("ok"))
+            executor = DatabricksExecutor(client=client)
+
+            events = [
+                event
+                async for event in executor.run_turn(
+                    [],
+                    [],
+                    "",
+                    config=ExecutorConfig(
+                        model="databricks-claude-sonnet-4-6",
+                        max_tokens=1024,
+                        extra={"reasoning_effort": "low"},
+                    ),
+                )
+            ]
+
+            self.assertEqual(len(events), 1)
+            self.assertIsInstance(events[0], ExecutorError)
+            self.assertFalse(events[0].retryable)
+            self.assertIn("at least 2048", events[0].message)
+            self.assertEqual(client.chat.completions.last_kwargs, {})
 
         _run(_t())
 
