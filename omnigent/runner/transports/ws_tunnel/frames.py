@@ -57,12 +57,16 @@ class HelloFrame:
         on major mismatch (RUNNER.md §2 "Version skew").
     :param harnesses: Names of harness kinds the runner can spawn.
     :param envs: Names of OS env types the runner supports.
+    :param installation_id: Runner-side persistent installation UUID
+        for usage telemetry.  ``None`` when the runner has opted out
+        or could not load an ID.
     """
 
     runner_version: str
     frame_protocol_version: int
     harnesses: list[str] = field(default_factory=list)
     envs: list[str] = field(default_factory=list)
+    installation_id: str | None = None
 
 
 @dataclass
@@ -200,6 +204,7 @@ def encode_frame(frame: Frame) -> str:
                 "frame_protocol_version": frame.frame_protocol_version,
                 "harnesses": list(frame.harnesses),
                 "envs": list(frame.envs),
+                "installation_id": frame.installation_id,
             }
         )
     if isinstance(frame, RequestFrame):
@@ -362,11 +367,14 @@ def _decode_hello(msg: dict[str, Any]) -> HelloFrame:
     :param msg: Decoded frame object.
     :returns: Typed hello frame.
     """
+    raw_id = msg.get("installation_id")
+    installation_id = raw_id if isinstance(raw_id, str) else None
     return HelloFrame(
         runner_version=_required_str(msg, "runner_version"),
         frame_protocol_version=_required_int(msg, "frame_protocol_version"),
         harnesses=_optional_str_list(msg, "harnesses"),
         envs=_optional_str_list(msg, "envs"),
+        installation_id=installation_id,
     )
 
 

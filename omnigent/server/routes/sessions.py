@@ -12568,6 +12568,22 @@ async def _create_session_from_existing_agent(
         conv = await asyncio.to_thread(conversation_store.get_conversation, conv.id)
     elif body.labels:
         await asyncio.to_thread(conversation_store.set_labels, conv.id, body.labels)
+
+    # Stamp the client surface label for telemetry correlation.
+    try:
+        from omnigent.telemetry import is_disabled as _tel_disabled
+        from omnigent.telemetry.surface import classify_surface as _classify_surface
+
+        if not _tel_disabled():
+            _surface_label = _classify_surface(request.headers.get("user-agent"))
+            await asyncio.to_thread(
+                conversation_store.set_labels,
+                conv.id,
+                {"omnigent.client": _surface_label},
+            )
+    except Exception:  # noqa: BLE001 — telemetry label is best-effort
+        pass
+
     if body.initial_items:
         runner_client = await _get_runner_client(conv.id, runner_router)
         if runner_client is None:
@@ -19322,6 +19338,29 @@ def create_sessions_router(
             # honestly, and the next message auto-relaunches the session on
             # its (still-online) host via the normal message-dispatch
             # relaunch path below.
+            try:
+                import hashlib as _hashlib
+
+                from omnigent.telemetry import emit as _tel_emit
+                from omnigent.telemetry import is_disabled as _tel_disabled
+                from omnigent.telemetry.events import SessionStoppedEvent
+                from omnigent.telemetry.installation_id import (
+                    get_installation_id as _get_installation_id,
+                )
+
+                if not _tel_disabled():
+                    _srv_id = _get_installation_id()
+                    _raw_uid = f"{_srv_id}:{user_id or 'local'}"
+                    _anon = _hashlib.sha256(_raw_uid.encode()).hexdigest()[:16]
+                    _tel_emit(
+                        SessionStoppedEvent(
+                            session_id=session_id,
+                            installation_id=_srv_id,
+                            anon_user_id=_anon,
+                        )
+                    )
+            except Exception:  # noqa: BLE001 — telemetry is best-effort
+                pass
             return {"queued": False}
         if body.type == _APPROVAL_TYPE:
             # Deliver the verdict through the shared resolver: it
@@ -20358,6 +20397,38 @@ def create_sessions_router(
                     # still deletes the row and revokes the token.
                     getattr(request.app.state, "sandbox_config", None),
                 )
+        try:
+            import hashlib as _hashlib
+            import time as _time
+
+            from omnigent.telemetry import emit as _tel_emit
+            from omnigent.telemetry import is_disabled as _tel_disabled
+            from omnigent.telemetry.events import SessionDeletedEvent
+            from omnigent.telemetry.installation_id import (
+                get_installation_id as _get_installation_id,
+            )
+
+            if not _tel_disabled():
+                _srv_id = _get_installation_id()
+                _raw_uid = f"{_srv_id}:{user_id or 'local'}"
+                _anon = _hashlib.sha256(_raw_uid.encode()).hexdigest()[:16]
+                _usage = conv.session_usage or {}
+                _duration: float | None = None
+                with contextlib.suppress(Exception):
+                    _duration = _time.time() - conv.created_at
+                _tel_emit(
+                    SessionDeletedEvent(
+                        session_id=session_id,
+                        installation_id=_srv_id,
+                        anon_user_id=_anon,
+                        duration_seconds=_duration,
+                        input_tokens=_usage.get("input_tokens"),
+                        output_tokens=_usage.get("output_tokens"),
+                        total_cost_usd=_usage.get("total_cost_usd"),
+                    )
+                )
+        except Exception:  # noqa: BLE001 — telemetry is best-effort
+            pass
         return ConversationDeleted(id=session_id)
 
     # ── Permission management endpoints ──────────────────────────

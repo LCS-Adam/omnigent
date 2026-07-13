@@ -1257,6 +1257,11 @@ def create_app(
 
         _to_thread.current_default_thread_limiter().total_tokens = 200
 
+        # Initialise usage telemetry (fire-and-forget; no-op when disabled).
+        from omnigent.telemetry import init_client as _init_telemetry
+
+        _init_telemetry()
+
         # Apply OMNIGENT_LOG_LEVEL to the omnigent namespace after
         # uvicorn's dictConfig runs (dictConfig resets existing handlers,
         # making a pre-run basicConfig call ineffective).
@@ -2220,6 +2225,57 @@ def create_app(
             _ensure_runner_relay,
             _publish_runner_recovered_status,
         )
+
+        # Emit session.created telemetry for each session bound to this runner.
+        try:
+            import hashlib
+
+            from omnigent.stores.conversation_store import FORK_SOURCE_LABEL_KEY
+            from omnigent.telemetry import emit as _tel_emit
+            from omnigent.telemetry import is_disabled as _tel_disabled
+            from omnigent.telemetry.events import SessionCreatedEvent
+            from omnigent.telemetry.installation_id import (
+                get_installation_id as _get_installation_id,
+            )
+
+            if not _tel_disabled():
+                _server_installation_id = _get_installation_id()
+                _runner_installation_id = tunnel_registry.get_runner_installation_id(runner_id)
+                _tel_convs = await asyncio.to_thread(
+                    conversation_store.list_conversations_by_runner_id, runner_id
+                )
+                for _conv in _tel_convs:
+                    try:
+                        _owner = conversation_store.get_session_owner(_conv.id)
+                        _anon_user_id: str | None = None
+                        if _server_installation_id is not None:
+                            _raw = f"{_server_installation_id}:{_owner or 'local'}"
+                            _anon_user_id = hashlib.sha256(_raw.encode()).hexdigest()[:16]
+                        _wrapper = _conv.labels.get("omnigent.wrapper")
+                        from omnigent.native_coding_agents import (
+                            native_coding_agent_for_wrapper_label,
+                        )
+
+                        _native = native_coding_agent_for_wrapper_label(_wrapper)
+                        _harness = _native.harness if _native is not None else _wrapper
+                        _surface = _conv.labels.get("omnigent.client")
+                        _tel_emit(
+                            SessionCreatedEvent(
+                                session_id=_conv.id,
+                                agent_id=_conv.agent_id,
+                                harness=_harness,
+                                surface=_surface,
+                                installation_id=_server_installation_id,
+                                runner_installation_id=_runner_installation_id,
+                                anon_user_id=_anon_user_id,
+                                is_fork=FORK_SOURCE_LABEL_KEY in _conv.labels,
+                                is_sub_agent=_conv.kind == "sub_agent",
+                            )
+                        )
+                    except Exception:  # noqa: BLE001 — per-session telemetry is best-effort
+                        pass
+        except Exception:  # noqa: BLE001 — telemetry block must not abort runner connect
+            pass
 
         # Direct by-runner lookup instead of list-everything-and-filter:
         # the listing path may be backed by an eventually-consistent

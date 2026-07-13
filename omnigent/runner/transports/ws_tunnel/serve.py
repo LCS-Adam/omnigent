@@ -583,6 +583,19 @@ async def _send_hello(
         frame, e.g. ``"0.1.0"``.
     :returns: None.
     """
+    # Include the runner's installation ID for server-side telemetry
+    # correlation.  Omit when telemetry is disabled so the server can
+    # tell the runner opted out.
+    _installation_id: str | None = None
+    try:
+        from omnigent.telemetry.client import is_disabled as _tel_disabled
+        from omnigent.telemetry.installation_id import get_installation_id as _get_id
+
+        if not _tel_disabled():
+            _installation_id = _get_id()
+    except Exception:  # noqa: BLE001 — telemetry errors must not abort hello
+        pass
+
     await send_text(
         encode_frame(
             HelloFrame(
@@ -597,6 +610,7 @@ async def _send_hello(
                     "pi",
                 ],
                 envs=["os_sandbox"],
+                installation_id=_installation_id,
             )
         )
     )

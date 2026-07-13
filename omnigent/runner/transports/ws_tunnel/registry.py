@@ -354,6 +354,18 @@ class TunnelRegistry:
         with self._lock:
             return self._sessions.get(runner_id)
 
+    def get_runner_installation_id(self, runner_id: str) -> str | None:
+        """Return the installation ID the runner advertised in its hello frame.
+
+        :param runner_id: Runner id, e.g. ``"runner_0123456789abcdef"``.
+        :returns: The runner's installation ID, or ``None`` when the
+            runner is offline or sent no installation ID.
+        """
+        session = self.get(runner_id)
+        if session is None:
+            return None
+        return session.hello.installation_id
+
     async def wait_for_runner(
         self,
         runner_id: str,
