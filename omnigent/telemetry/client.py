@@ -218,7 +218,11 @@ def is_disabled() -> bool:
     try:
         if os.environ.get("OMNIGENT_TELEMETRY", "").strip() == "0":
             return True
-        for var in ("DISABLE_TELEMETRY", "OMNIGENT_DISABLE_TELEMETRY"):
+        for var in (
+            "DISABLE_TELEMETRY",
+            "OMNIGENT_DISABLE_TELEMETRY",
+            "OMNIGENT_TELEMETRY_DISABLE",
+        ):
             if os.environ.get(var, "").strip().lower() in ("1", "true", "yes"):
                 return True
         if os.environ.get("DO_NOT_TRACK", "").strip() == "1":
@@ -512,13 +516,19 @@ def get_client() -> TelemetryClient | None:
     return _CLIENT
 
 
-def init_client() -> None:
+def init_client(*, config: dict[str, Any] | None = None) -> None:
     """Initialise the module-level client if telemetry is enabled.
 
     Safe to call multiple times; idempotent after the first call.
+
+    :param config: Optional parsed server config dict (e.g. from ``-c
+        config.yaml``).  When ``config.get("telemetry") is False``
+        telemetry is disabled regardless of env vars.
     """
     global _CLIENT
     if is_disabled():
+        return
+    if config is not None and config.get("telemetry") is False:
         return
     # Prime the installation-id cache on startup so later request
     # handlers do not perform synchronous file I/O on the event loop.
