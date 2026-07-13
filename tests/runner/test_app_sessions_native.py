@@ -11285,20 +11285,32 @@ async def test_external_idle_status_makes_required_terminal_exit_clean(tmp_path:
         on_exit = callbacks.get("on_exit")
         assert callable(on_exit)
         on_exit()
+        # Await the terminal-exit cleanup deterministically instead of polling
+        # (see the primary idle-exit test): the registry signals when its
+        # cleanup task is scheduled, so awaiting drives the publish (the
+        # ``deleted`` event is enqueued and the release task is created) to
+        # completion regardless of event-loop scheduling. The release task is
+        # created synchronously inside that publish, so once the cleanup task is
+        # awaited it is either already done (``pm.released`` set) or still
+        # pending; await any pending instance so the release is observed by
+        # construction, not by racing a drain.
+        await resource_registry.wait_for_terminal_exit_cleanup()
+        release_task_name = f"required-terminal-release:{conv_id}"
+        pending_release = [
+            task
+            for task in asyncio.all_tasks()
+            if task.get_name() == release_task_name and not task.done()
+        ]
+        if pending_release:
+            await asyncio.gather(*pending_release)
+
         deleted_event = {
             "type": "session.resource.deleted",
             "resource_id": "terminal_kiro_main",
             "resource_type": "terminal",
             "session_id": conv_id,
         }
-        queued_events: list[dict[str, Any]] = []
-        for _ in range(1000):
-            queued_events.extend(
-                _drain_session_event_queue(_session_event_queues_ref.get(conv_id))
-            )
-            if pm.released and deleted_event in queued_events:
-                break
-            await asyncio.sleep(0)
+        queued_events = _drain_session_event_queue(_session_event_queues_ref.get(conv_id))
     finally:
         _session_event_queues_ref.pop(conv_id, None)
 
