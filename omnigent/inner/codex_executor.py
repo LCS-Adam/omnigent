@@ -796,6 +796,7 @@ def _databricks_codex_config_overrides(
     return [
         f"model={json.dumps(model)}",
         f'model_provider="{provider_name}"',
+        "model_supports_reasoning_summaries=true",
         (
             "model_providers.omnigent_databricks="
             '{name="Omnigent Databricks",'

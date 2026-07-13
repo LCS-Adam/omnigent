@@ -24,8 +24,6 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 
 import httpx
 
-from omnigent.reasoning_effort import ANTHROPIC_EFFORTS, validate_effort
-
 if TYPE_CHECKING:
     from openai import OpenAI, Stream
     from openai.types.chat import ChatCompletionChunk
@@ -37,7 +35,6 @@ from .executor import (
     ExecutorError,
     ExecutorEvent,
     Message,
-    ReasoningChunk,
     TextChunk,
     ToolCallRequest,
     ToolSpec,
@@ -60,15 +57,6 @@ _SESSION_ONLY_EXECUTOR_EXTRA_KEYS = {
     "new_user_messages_flushed",
     "stepwise_internal_turns",
 }
-
-_CLAUDE_THINKING_BUDGETS = {
-    "low": 1024,
-    "medium": 4096,
-    "high": 8192,
-    "xhigh": 16384,
-    "max": 32768,
-}
-_CLAUDE_MIN_THINKING_TOKENS = 1024
 
 
 @dataclass
@@ -763,93 +751,39 @@ def _convert_messages(
     return result
 
 
-def _extract_stream_content(content: Any) -> tuple[str, str]:
+def _extract_stream_text_delta(content: Any) -> str:
     """
-    Extract assistant-visible text and reasoning from a stream delta.
+    Extract assistant-visible text from a Chat Completions stream delta.
 
     Some OpenAI-compatible Databricks models stream ``delta.content`` as
     a list of typed content blocks instead of a plain string. Kimi, for
     example, emits ``{"type": "reasoning", "summary": [...]}`` blocks
-    before the final answer. Reasoning summaries are kept separate from
-    assistant-visible text so callers can render them as thinking output.
+    before the final answer. The legacy executor contract only supports
+    assistant-visible text chunks, so reasoning blocks are ignored while
+    recognized text blocks are concatenated.
 
     :param content: Raw ``choice.delta.content`` value from the OpenAI SDK,
         e.g. ``"hello"`` or ``[{"type": "text", "text": "hello"}]``.
-    :returns: ``(text, reasoning)`` strings extracted from the content.
+    :returns: Plain text to emit as a :class:`TextChunk`, or ``""`` when
+        the delta contains no assistant-visible text.
     """
     if isinstance(content, str):
-        return content, ""
+        return content
     if not isinstance(content, list):
-        return "", ""
+        return ""
 
-    text_pieces: list[str] = []
-    reasoning_pieces: list[str] = []
+    pieces: list[str] = []
     for block in content:
         if isinstance(block, str):
-            text_pieces.append(block)
+            pieces.append(block)
             continue
         if not isinstance(block, dict):
             continue
-        block_type = block.get("type")
-        if block_type in {"text", "output_text"}:
+        if block.get("type") in {"text", "output_text"}:
             text = block.get("text")
             if isinstance(text, str):
-                text_pieces.append(text)
-        elif block_type == "reasoning":
-            for summary in block.get("summary") or []:
-                if isinstance(summary, dict):
-                    text = summary.get("text")
-                    if isinstance(text, str):
-                        reasoning_pieces.append(text)
-    return "".join(text_pieces), "".join(reasoning_pieces)
-
-
-def _reasoning_content(delta: Any) -> str:
-    """Return provider-specific top-level reasoning content from *delta*."""
-    value = getattr(delta, "reasoning_content", None)
-    if isinstance(value, str):
-        return value
-    model_extra = getattr(delta, "model_extra", None)
-    if isinstance(model_extra, dict):
-        value = model_extra.get("reasoning_content")
-        if isinstance(value, str):
-            return value
-    return ""
-
-
-def _apply_reasoning_request(
-    kwargs: OpenAIKwargs,
-    *,
-    model: str,
-    max_tokens: int,
-) -> None:
-    """Translate generic reasoning effort into the model's FMAPI request shape."""
-    effort = kwargs.get("reasoning_effort")
-    if effort is None or "claude" not in model.lower():
-        return
-
-    validated = validate_effort(effort, "Databricks Claude FMAPI", ANTHROPIC_EFFORTS)
-    kwargs.pop("reasoning_effort", None)
-    if validated is None:
-        return
-    if max_tokens < 2 * _CLAUDE_MIN_THINKING_TOKENS:
-        raise ValueError(
-            "Claude extended thinking requires max_tokens of at least 2048 "
-            "to reserve tokens for both thinking and the answer"
-        )
-
-    requested = _CLAUDE_THINKING_BUDGETS[validated]
-    budget_tokens = min(requested, max_tokens // 2)
-    existing_extra_body = kwargs.get("extra_body")
-    extra_body = dict(existing_extra_body) if isinstance(existing_extra_body, dict) else {}
-    extra_body.setdefault(
-        "thinking",
-        {
-            "type": "enabled",
-            "budget_tokens": budget_tokens,
-        },
-    )
-    kwargs["extra_body"] = extra_body
+                pieces.append(text)
+    return "".join(pieces)
 
 
 class DatabricksExecutor(Executor):
@@ -957,11 +891,6 @@ class DatabricksExecutor(Executor):
                 if key not in _SESSION_ONLY_EXECUTOR_EXTRA_KEYS
             }
         )
-        try:
-            _apply_reasoning_request(kwargs, model=model, max_tokens=cfg.max_tokens)
-        except ValueError as exc:
-            yield ExecutorError(message=str(exc), retryable=False)
-            return
 
         try:
             logger.debug(
@@ -1003,7 +932,6 @@ class DatabricksExecutor(Executor):
             return
 
         full_text = ""
-        reasoning_started = False
         # Tool call arguments arrive in pieces; accumulate per index.
         pending_tool_calls: dict[int, dict[str, str]] = {}
 
@@ -1029,26 +957,10 @@ class DatabricksExecutor(Executor):
                 delta = choice.delta
 
                 if delta:
-                    text_delta, reasoning_summary_delta = _extract_stream_content(delta.content)
-                    top_level_reasoning = _reasoning_content(delta)
-                    if top_level_reasoning or reasoning_summary_delta:
-                        if not reasoning_started:
-                            yield ReasoningChunk(delta="", event_type="reasoning_started")
-                            reasoning_started = True
-                        if top_level_reasoning:
-                            yield ReasoningChunk(
-                                delta=top_level_reasoning,
-                                event_type="reasoning_text",
-                            )
-                        if reasoning_summary_delta:
-                            yield ReasoningChunk(
-                                delta=reasoning_summary_delta,
-                                event_type="reasoning_summary",
-                            )
+                    text_delta = _extract_stream_text_delta(delta.content)
                     if text_delta:
                         yield TextChunk(text=text_delta)
                         full_text += text_delta
-                        reasoning_started = False
 
                 if delta and delta.tool_calls:
                     for tc_delta in delta.tool_calls:

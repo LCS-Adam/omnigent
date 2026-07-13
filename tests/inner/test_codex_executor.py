@@ -141,6 +141,7 @@ class TestCodexExecutor(unittest.TestCase):
         )
         self.assertIn('model="databricks-gpt-5-4-mini"', overrides)
         self.assertIn('model_provider="omnigent_databricks"', overrides)
+        self.assertIn("model_supports_reasoning_summaries=true", overrides)
         self.assertTrue(any("/ai-gateway/codex/v1" in item for item in overrides))
         self.assertFalse(any("/serving-endpoints" in item for item in overrides))
         self.assertTrue(any('auth={command="sh"' in item for item in overrides))
