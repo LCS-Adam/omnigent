@@ -105,3 +105,37 @@ describe("window-open policy wiring (src/main.js)", () => {
     );
   });
 });
+
+// Guards for the popup ↔ localhost-trust bridge. E2E-verified failure mode
+// when this wiring is lost: Okta FastPass runs INSIDE the OAuth popup,
+// queries the Local Network Access permission for its localhost helper,
+// receives "denied" (the popup is deliberately not a shell window), and
+// fails closed — "The browser is blocking communication with Okta Verify" —
+// which blocks sign-in for every Okta-fronted provider.
+describe("OAuth popup localhost trust wiring (src/main.js)", () => {
+  it("registers popups in oauthPopups inside hardenOauthPopup as live code", () => {
+    assert.match(
+      liveCode,
+      /function hardenOauthPopup\(child\)\s*\{[\s\S]{0,120}oauthPopups\.add\(child\)/,
+      [
+        "hardenOauthPopup no longer registers the popup in oauthPopups (with a matching",
+        "closed → delete). Without the registry entry, isCurrentPopupOrigin never matches,",
+        "the popup's IdP pages get a denied LNA answer, and Okta FastPass fails closed",
+        "inside every sign-in popup. Restore the oauthPopups.add(child) + cleanup.",
+      ].join(" "),
+    );
+  });
+
+  it("extends isLocalhostTrustedOrigin to live popup pages as live code", () => {
+    assert.match(
+      liveCode,
+      /function isLocalhostTrustedOrigin\(origin\)\s*\{[\s\S]{0,300}isCurrentPopupOrigin\(origin\)/,
+      [
+        "isLocalhostTrustedOrigin no longer consults isCurrentPopupOrigin. The popup's",
+        "current top-level page needs the same auth-surface localhost trust as a shell",
+        "window's (Okta FastPass probes its localhost helper from inside the popup);",
+        "without this line the popup OAuth flow breaks for every Okta-fronted provider.",
+      ].join(" "),
+    );
+  });
+});

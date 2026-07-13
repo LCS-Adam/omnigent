@@ -56,9 +56,10 @@ const WEB_SCHEMES = new Set(["http:", "https:", "mailto:"]);
  */
 const OAUTH_POPUP_ORIGINS = new Set([
   "https://github.com", // GitHub (system.ai.github)
-  "https://accounts.google.com", // Google Drive / GA4 / Google Ads
-  "https://slack.com", // Slack (system.ai.slack)
-  "https://auth.atlassian.com", // Jira / Confluence
+  "https://accounts.google.com", // Google Drive / Gmail / Calendar / GA4 / Ads
+  "https://slack.com", // Slack (system.ai.slack — MCP authorize lives on slack.com, not mcp.slack.com)
+  "https://mcp.atlassian.com", // Atlassian MCP (DCR; authorization server IS the MCP host)
+  "https://auth.atlassian.com", // Jira / Confluence (classic ingestion connectors)
   "https://login.microsoftonline.com", // SharePoint / OneDrive / Power BI / Azure SQL
   "https://login.salesforce.com", // Salesforce
   "https://test.salesforce.com", // Salesforce sandbox orgs

@@ -178,17 +178,19 @@ dismisses.
   popup-shaped (explicit width/height features), the opener window is
   pinned and currently _on_ its pinned origin, and the target is `https`
   on the pinned origin itself, a well-known OAuth authorization host
-  (github.com, accounts.google.com, slack.com, auth.atlassian.com,
-  login.microsoftonline.com, salesforce.com), or hand-listed in
-  `settings.json` under `popup_allowed_origins`. The child is hardened
-  (`hardenOauthPopup`): it never gets the shell preload (a no-op
-  `popup_preload.js` instead), runs sandboxed, shows the **current host in
-  its title** on every navigation (the page can't control the prefix),
-  cannot open popups of its own, and is never entered in the shell's
-  window registry — so nothing it shows can gain the localhost trust
-  described below. Custom providers on other domains fall back to the
-  external browser; add their authorization origin to
-  `popup_allowed_origins` to sign in without leaving the app:
+  (github.com, accounts.google.com, slack.com, mcp.atlassian.com,
+  auth.atlassian.com, login.microsoftonline.com, salesforce.com), or
+  hand-listed in `settings.json` under `popup_allowed_origins`. The child
+  is hardened (`hardenOauthPopup`): it never gets the shell preload (a
+  no-op `popup_preload.js` instead), runs sandboxed, shows the **current
+  host in its title** on every navigation (the page can't control the
+  prefix), and cannot open popups of its own. It is never entered in the
+  shell's window registry, so it gains none of that registry's privileges
+  — its only grant is the auth-surface localhost trust described below
+  (sign-in chains run IdP device-trust checks, e.g. Okta FastPass, inside
+  the popup). Custom providers on other domains fall back to the external
+  browser; add their authorization origin to `popup_allowed_origins` to
+  sign in without leaving the app:
 
   ```json
   { "popup_allowed_origins": ["https://sso.my-git-host.example.com"] }
@@ -613,10 +615,13 @@ means:
   advance (server → SSO domain → localhost helper probe), and those
   pages get localhost access while the user is actually on them.
   In-window navigation only starts from the pinned server (links open in
-  the external browser, and the one popup the shell allows — the OAuth
-  sign-in window — is a child window outside the shell's window registry,
-  so its pages never qualify), which keeps this from extending to
-  arbitrary sites; iframes never match (main-frame origin only).
+  the external browser), which keeps this from extending to arbitrary
+  sites; iframes never match (main-frame origin only). The **current
+  top-level page of a live OAuth sign-in popup** gets the same trust for
+  the same reason — the IdP device-trust checks (Okta FastPass) run
+  _inside_ the popup and fail closed without it — bounded the same way:
+  popups only ever start on allowlisted sign-in hosts, and a closed popup
+  confers nothing. Popups gain no other shell-window privileges.
 
 Anything else stays blocked by normal CORS, and a localhost service that
 sends its own `Access-Control-Allow-Origin` keeps enforcing its own

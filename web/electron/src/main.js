@@ -366,12 +366,35 @@ function isCurrentWindowOrigin(origin) {
 }
 
 /**
+ * True when an origin is the CURRENT top-level page of a live OAuth popup
+ * (hardenOauthPopup). The popup counterpart of isCurrentWindowOrigin, with
+ * the same rationale: a sign-in chain redirects through IdP origins that
+ * can't be known in advance, and device-trust scripts on those pages (Okta
+ * FastPass) must reach their localhost helper while the user is actually on
+ * them. Scope stays narrow the same way: popups only ever START on
+ * allowlisted sign-in hosts (popupPolicy.js), only the main frame counts,
+ * and a closed popup confers nothing.
+ *
+ * @param {string} origin e.g. ``"https://company.okta.com"``.
+ * @returns {boolean}
+ */
+function isCurrentPopupOrigin(origin) {
+  for (const popup of oauthPopups) {
+    if (popup.isDestroyed()) continue;
+    if (originOf(popup.webContents.getURL()) === origin) return true;
+  }
+  return false;
+}
+
+/**
  * The trust predicate for localhost access, shared by the CORS injection
  * (registerLocalhostAccess) and the Local Network Access permission answer
  * (lnaPermissionGranted). An origin is trusted when it is: an origin some
  * window is pinned to (a server the user explicitly connected to), the
  * current top-level page of a pinned window (SSO/IdP pages reached via
- * auth redirects — see isCurrentWindowOrigin), or hand-listed in
+ * auth redirects — see isCurrentWindowOrigin), the current top-level page
+ * of a live OAuth popup (the same IdP device-trust checks run inside the
+ * sign-in popup — see isCurrentPopupOrigin), or hand-listed in
  * settings.json under ``localhost_allowed_origins`` (escape hatch for
  * pages that need localhost while NOT being the visible top-level page).
  *
@@ -382,6 +405,7 @@ function isLocalhostTrustedOrigin(origin) {
   if (!origin) return false;
   if (isPinnedServerUrl(origin)) return true;
   if (isCurrentWindowOrigin(origin)) return true;
+  if (isCurrentPopupOrigin(origin)) return true;
   const extra = loadSettings().localhost_allowed_origins;
   return Array.isArray(extra) && extra.includes(origin);
 }
@@ -476,6 +500,22 @@ function applyDockIcon() {
  * @type {Map<BrowserWindow, WindowState>}
  */
 const windows = new Map();
+
+/**
+ * Live OAuth popup child windows (see hardenOauthPopup). Tracked SEPARATELY
+ * from `windows` on purpose: a popup must never gain shell-window privileges
+ * (badge/notification IPC, session-expiry reloads, protocol always-allow
+ * grants), but its main frame IS an auth surface — IdP device-trust checks
+ * (Okta FastPass) run INSIDE the popup and probe a localhost helper exactly
+ * like main-frame SSO does, and fail closed when the LNA permission answer
+ * is "denied" (verified: FastPass shows "browser is blocking communication
+ * with Okta Verify"). isLocalhostTrustedOrigin therefore extends the same
+ * while-the-user-is-on-it trust to a popup's CURRENT top-level origin via
+ * isCurrentPopupOrigin — and nothing else.
+ *
+ * @type {Set<BrowserWindow>}
+ */
+const oauthPopups = new Set();
 
 /**
  * Recompute the app-wide dock/taskbar badge: take each distinct pinned
@@ -886,13 +926,19 @@ function cascadeIfCovering(win) {
  *     dropped outright — no consent dialog, unlike the shell window, since
  *     there is no pinned-origin trust to anchor one.
  *
- * The child is NEVER entered in `windows`, so nothing it shows can become
- * a "pinned window's current page" for the localhost trust checks — see
- * isCurrentWindowOrigin.
+ * The child is NEVER entered in `windows`, so it can't acquire shell-window
+ * privileges (badge/notification IPC, session-expiry reloads, protocol
+ * always-allow grants). It IS tracked in `oauthPopups`: sign-in chains
+ * redirect through IdPs whose device-trust checks (Okta FastPass) probe a
+ * localhost helper from inside the popup, so the popup's current top-level
+ * origin gets the same auth-surface localhost trust as a shell window's —
+ * see isCurrentPopupOrigin and the `oauthPopups` doc.
  *
  * @param {BrowserWindow} child The freshly created popup window.
  */
 function hardenOauthPopup(child) {
+  oauthPopups.add(child);
+  child.on("closed", () => oauthPopups.delete(child));
   const stampTitle = () => {
     if (child.isDestroyed()) return;
     let host = "";
