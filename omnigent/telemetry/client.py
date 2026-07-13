@@ -5,7 +5,7 @@ application.  All opt-out signals are checked in :func:`is_disabled`.
 
 Wire format (matches the API Gateway / Kinesis ingestion schema):
 
-    POST OMNIGENT_TELEMETRY_ENDPOINT
+    POST <ingestion_url>
     {
         "records": [
             {
@@ -34,6 +34,27 @@ server run — it is NOT the Omnigent conversation id (which goes in
 fields.  ``additionalProperties: false`` on the gateway means any field
 not in the schema above will cause a 400, so event-specific data must
 live in ``params``.
+
+Remote config
+~~~~~~~~~~~~~
+On startup a daemon thread fetches a JSON config from a versioned URL::
+
+    https://telemetry.omnigent.ai/config/{version}.json   (prod)
+    https://telemetry-staging.omnigent.ai/config/{version}.json  (dev/pre-release)
+
+The config shape::
+
+    {
+        "omnigent_version": "0.5.0",
+        "ingestion_url": "https://...",   # required; disables telemetry if absent
+        "disable_telemetry": false,       # kill-switch
+        "disable_events": [],             # per-event kill-switch list
+        "disable_os": [],                 # e.g. ["Windows"]
+        "rollout_percentage": 100         # 0-100; probabilistic rollout
+    }
+
+If the config fetch fails or the config disables telemetry, the client
+stops itself and drops all pending events.
 """
 
 from __future__ import annotations
@@ -44,11 +65,12 @@ import logging
 import os
 import platform
 import queue
+import random
 import sys
 import threading
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -78,37 +100,84 @@ _BATCH_SIZE = 50
 _BATCH_INTERVAL_S = 30.0
 _MAX_QUEUE_SIZE = 512
 _SCHEMA_VERSION = 1
+_CONFIG_FETCH_TIMEOUT_S = 2.0
 
-# Telemetry ingestion endpoints. Dev/pre-release versions go to staging;
-# final releases go to production. The env var overrides both (for testing).
-_ENDPOINT_PROD = "https://telemetry.omnigent.ai/ingest"
-_ENDPOINT_STAGING = "https://telemetry-staging.omnigent.ai/ingest"
+# Remote config base URLs. Dev/pre-release versions use staging.
+_CONFIG_URL_PROD = "https://telemetry.omnigent.ai/config"
+_CONFIG_URL_STAGING = "https://telemetry-staging.omnigent.ai/config"
 
 # Per-process telemetry session ID — groups all events from one server run.
 _TELEMETRY_SESSION_ID: str = str(uuid.uuid4())
 
 
-def _resolve_endpoint() -> str:
-    """Return the telemetry ingestion URL for the running version.
+@dataclass
+class TelemetryConfig:
+    """Resolved remote configuration for the telemetry client."""
 
-    Precedence:
-    1. ``OMNIGENT_TELEMETRY_ENDPOINT`` env var (override for local testing)
-    2. Staging endpoint for dev / pre-release builds (version contains
-       ``dev`` or ``a``/``b``/``rc`` pre-release markers)
-    3. Production endpoint for final releases
+    ingestion_url: str
+    disable_events: set[str] = field(default_factory=set)
+
+
+def _config_url() -> str:
+    """Return the remote config URL for the running version.
+
+    ``OMNIGENT_TELEMETRY_CONFIG_URL`` overrides for local testing.
+    Dev/pre-release versions use the staging URL.
     """
-    override = os.environ.get("OMNIGENT_TELEMETRY_ENDPOINT", "").strip()
+    override = os.environ.get("OMNIGENT_TELEMETRY_CONFIG_URL", "").strip()
     if override:
-        return override
+        return f"{override.rstrip('/')}/{VERSION}.json"
     try:
         from packaging.version import Version
 
         v = Version(VERSION)
         if v.is_devrelease or v.is_prerelease:
-            return _ENDPOINT_STAGING
+            return f"{_CONFIG_URL_STAGING}/{VERSION}.json"
     except Exception:
-        _logger.debug("Version parse failed; defaulting to production endpoint", exc_info=True)
-    return _ENDPOINT_PROD
+        _logger.debug("Version parse failed; using production config URL", exc_info=True)
+    return f"{_CONFIG_URL_PROD}/{VERSION}.json"
+
+
+def _fetch_remote_config() -> TelemetryConfig | None:
+    """Fetch and validate the remote telemetry config.
+
+    :returns: :class:`TelemetryConfig` on success, ``None`` when
+        telemetry should be disabled (fetch failure, kill-switch, OS
+        exclusion, or rollout exclusion).
+    """
+    try:
+        import urllib.request
+
+        url = _config_url()
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=_CONFIG_FETCH_TIMEOUT_S) as resp:
+            cfg: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
+
+        if cfg.get("omnigent_version") != VERSION:
+            _logger.debug("Telemetry config version mismatch; disabling telemetry")
+            return None
+        if cfg.get("disable_telemetry") is True:
+            _logger.debug("Telemetry disabled by remote config kill-switch")
+            return None
+        ingestion_url: str | None = cfg.get("ingestion_url")
+        if not ingestion_url:
+            _logger.debug("Telemetry config missing ingestion_url; disabling telemetry")
+            return None
+        if platform.system() in cfg.get("disable_os", []):
+            _logger.debug("Telemetry disabled for OS %s by remote config", platform.system())
+            return None
+        rollout = cfg.get("rollout_percentage", 100)
+        if random.randint(0, 100) > rollout:
+            _logger.debug("Telemetry excluded by rollout_percentage=%s", rollout)
+            return None
+
+        return TelemetryConfig(
+            ingestion_url=ingestion_url,
+            disable_events=set(cfg.get("disable_events", [])),
+        )
+    except Exception:
+        _logger.debug("Telemetry config fetch failed; disabling telemetry", exc_info=True)
+        return None
 
 
 def _config_telemetry_disabled() -> bool:
@@ -191,6 +260,8 @@ def _build_record(event: object) -> dict[str, Any]:
     JSON-encoded into the ``params`` string so the gateway schema's
     ``additionalProperties: false`` constraint is satisfied.
     """
+    from dataclasses import asdict
+
     fields: dict[str, Any] = asdict(event)  # type: ignore[arg-type]
     installation_id: str | None = fields.pop("installation_id", None)
 
@@ -224,22 +295,25 @@ def _build_record(event: object) -> dict[str, Any]:
 class TelemetryClient:
     """Fire-and-forget telemetry emitter backed by a background thread.
 
-    Events are serialised into the gateway wire format and placed on an
-    in-memory queue.  A single daemon thread consumes the queue and POSTs
-    batches to the resolved ingestion endpoint (staging for dev/pre-release
-    builds, production for final releases).
+    On startup a daemon thread fetches the remote config (ingestion URL,
+    kill-switches, rollout percentage).  The consumer thread buffers events
+    until the config is resolved, then sends or discards them.  If the
+    config fetch fails or signals ``disable_telemetry``, the client stops
+    itself.
 
-    All errors in the background thread are suppressed.
+    All errors are suppressed — telemetry must never disrupt the application.
     """
 
     def __init__(self) -> None:
-        self._endpoint: str = _resolve_endpoint()
+        self._config: TelemetryConfig | None = None
+        self._config_ready = threading.Event()
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._lock = threading.Lock()
         self._started = False
         self._stopped = False
         self._atexit_registered = False
         self._thread: threading.Thread | None = None
+        self._config_thread: threading.Thread | None = None
 
     # ── Public interface ─────────────────────────────────
 
@@ -247,6 +321,7 @@ class TelemetryClient:
         """Queue an event for async delivery.
 
         Accepts any dataclass; converts it to the gateway wire format.
+        Skips events listed in ``config.disable_events``.
         Silently no-ops when disabled or stopped.
 
         :param event: A dataclass instance, e.g. :class:`SessionCreatedEvent`.
@@ -259,6 +334,11 @@ class TelemetryClient:
         if is_disabled():
             return
         try:
+            event_name = type(event).__name__
+            # If config is already resolved, check per-event kill-switch.
+            if self._config_ready.is_set() and self._config is not None:
+                if event_name in self._config.disable_events:
+                    return
             record = _build_record(event)
             self._ensure_started()
             try:
@@ -295,6 +375,15 @@ class TelemetryClient:
         with self._lock:
             if self._started:
                 return
+            # Config fetch runs in its own daemon thread so it never blocks
+            # the first emit call.
+            self._config_thread = threading.Thread(
+                target=self._load_config,
+                name="OmnigentTelemetryConfig",
+                daemon=True,
+            )
+            self._config_thread.start()
+
             self._thread = threading.Thread(
                 target=self._consumer,
                 name="OmnigentTelemetryConsumer",
@@ -306,6 +395,25 @@ class TelemetryClient:
                 atexit.register(self._atexit_callback)
                 self._atexit_registered = True
 
+    def _load_config(self) -> None:
+        """Daemon thread: fetch remote config then signal the consumer."""
+        try:
+            cfg = _fetch_remote_config()
+            if cfg is None:
+                # Kill-switch or fetch failure — stop the client.
+                self._stopped = True
+                try:
+                    self._queue.put_nowait(None)  # unblock consumer
+                except queue.Full:
+                    pass
+            else:
+                self._config = cfg
+        except Exception:
+            _logger.debug("Telemetry config load failed; stopping client", exc_info=True)
+            self._stopped = True
+        finally:
+            self._config_ready.set()
+
     def _atexit_callback(self) -> None:
         try:
             self.shutdown()
@@ -313,7 +421,22 @@ class TelemetryClient:
             pass  # best-effort shutdown at process exit; telemetry must never disrupt termination
 
     def _consumer(self) -> None:
-        """Background thread: drain the queue in batches."""
+        """Background thread: wait for config, then drain the queue in batches."""
+        # Wait for config to be resolved before sending anything.
+        self._config_ready.wait()
+
+        if self._stopped or self._config is None:
+            # Config fetch failed or kill-switched — drain and discard.
+            while not self._queue.empty():
+                try:
+                    self._queue.get_nowait()
+                    self._queue.task_done()
+                except queue.Empty:
+                    break
+            return
+
+        ingestion_url = self._config.ingestion_url
+        disable_events = self._config.disable_events
         pending: list[dict[str, Any]] = []
         last_flush = time.monotonic()
 
@@ -322,7 +445,7 @@ class TelemetryClient:
                 item = self._queue.get(timeout=1.0)
             except queue.Empty:
                 if pending and time.monotonic() - last_flush >= _BATCH_INTERVAL_S:
-                    self._send(pending)
+                    self._send(pending, ingestion_url)
                     pending = []
                     last_flush = time.monotonic()
                 continue
@@ -330,15 +453,19 @@ class TelemetryClient:
             if item is None:
                 # Poison pill — flush what we have, then exit.
                 if pending:
-                    self._send(pending)
+                    self._send(pending, ingestion_url)
                 self._queue.task_done()
                 break
 
-            pending.append(item)
+            # Apply per-event kill-switch at send time too (config may have
+            # arrived after the event was queued).
+            event_name = (item.get("data") or {}).get("event_name", "")
+            if event_name not in disable_events:
+                pending.append(item)
             self._queue.task_done()
 
             if len(pending) >= _BATCH_SIZE or time.monotonic() - last_flush >= _BATCH_INTERVAL_S:
-                self._send(pending)
+                self._send(pending, ingestion_url)
                 pending = []
                 last_flush = time.monotonic()
 
@@ -347,14 +474,16 @@ class TelemetryClient:
             try:
                 item = self._queue.get_nowait()
                 if item is not None:
-                    pending.append(item)
+                    event_name = (item.get("data") or {}).get("event_name", "")
+                    if event_name not in disable_events:
+                        pending.append(item)
                 self._queue.task_done()
             except queue.Empty:
                 break
         if pending:
-            self._send(pending)
+            self._send(pending, ingestion_url)
 
-    def _send(self, records: list[dict[str, Any]]) -> None:
+    def _send(self, records: list[dict[str, Any]], ingestion_url: str) -> None:
         """POST a batch to the ingestion endpoint."""
         if not records:
             return
@@ -363,7 +492,7 @@ class TelemetryClient:
 
             body = json.dumps({"records": records}).encode("utf-8")
             req = urllib.request.Request(
-                self._endpoint,
+                ingestion_url,
                 data=body,
                 headers={"Content-Type": "application/json"},
                 method="POST",
