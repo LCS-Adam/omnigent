@@ -288,7 +288,6 @@ from omnigent.stores.file_store import FileStore
 from omnigent.stores.host_store import Host, HostStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.telemetry import emit as _tel_emit
-from omnigent.telemetry import is_disabled as _tel_disabled
 from omnigent.telemetry.events import SessionCreatedEvent as _TelSessionCreatedEvent
 from omnigent.telemetry.events import SessionDeletedEvent as _TelSessionDeletedEvent
 from omnigent.telemetry.events import SessionStoppedEvent as _TelSessionStoppedEvent
@@ -12575,18 +12574,6 @@ async def _create_session_from_existing_agent(
         conv = await asyncio.to_thread(conversation_store.get_conversation, conv.id)
     elif body.labels:
         await asyncio.to_thread(conversation_store.set_labels, conv.id, body.labels)
-
-    # Stamp the client surface label for telemetry correlation.
-    try:
-        if not _tel_disabled():
-            _surface_label = _classify_surface(request.headers.get("user-agent"))
-            await asyncio.to_thread(
-                conversation_store.set_labels,
-                conv.id,
-                {"omnigent.client": _surface_label},
-            )
-    except Exception:  # noqa: BLE001 — telemetry label is best-effort
-        pass
 
     # Emit session.created exactly once at creation time.
     try:
