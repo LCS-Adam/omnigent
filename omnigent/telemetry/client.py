@@ -79,8 +79,36 @@ _BATCH_INTERVAL_S = 30.0
 _MAX_QUEUE_SIZE = 512
 _SCHEMA_VERSION = 1
 
+# Telemetry ingestion endpoints. Dev/pre-release versions go to staging;
+# final releases go to production. The env var overrides both (for testing).
+_ENDPOINT_PROD = "https://telemetry.omnigent.ai/ingest"
+_ENDPOINT_STAGING = "https://telemetry-staging.omnigent.ai/ingest"
+
 # Per-process telemetry session ID — groups all events from one server run.
 _TELEMETRY_SESSION_ID: str = str(uuid.uuid4())
+
+
+def _resolve_endpoint() -> str:
+    """Return the telemetry ingestion URL for the running version.
+
+    Precedence:
+    1. ``OMNIGENT_TELEMETRY_ENDPOINT`` env var (override for local testing)
+    2. Staging endpoint for dev / pre-release builds (version contains
+       ``dev`` or ``a``/``b``/``rc`` pre-release markers)
+    3. Production endpoint for final releases
+    """
+    override = os.environ.get("OMNIGENT_TELEMETRY_ENDPOINT", "").strip()
+    if override:
+        return override
+    try:
+        from packaging.version import Version
+
+        v = Version(VERSION)
+        if v.is_devrelease or v.is_prerelease:
+            return _ENDPOINT_STAGING
+    except Exception:
+        pass
+    return _ENDPOINT_PROD
 
 
 def _config_telemetry_disabled() -> bool:
@@ -198,15 +226,14 @@ class TelemetryClient:
 
     Events are serialised into the gateway wire format and placed on an
     in-memory queue.  A single daemon thread consumes the queue and POSTs
-    batches to ``OMNIGENT_TELEMETRY_ENDPOINT`` when that variable is set.
-    If the variable is absent the queue is drained silently (useful for
-    testing that instrumentation fires without a live endpoint).
+    batches to the resolved ingestion endpoint (staging for dev/pre-release
+    builds, production for final releases).
 
     All errors in the background thread are suppressed.
     """
 
     def __init__(self) -> None:
-        self._endpoint: str | None = os.environ.get("OMNIGENT_TELEMETRY_ENDPOINT")
+        self._endpoint: str = _resolve_endpoint()
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._lock = threading.Lock()
         self._started = False
@@ -328,8 +355,8 @@ class TelemetryClient:
             self._send(pending)
 
     def _send(self, records: list[dict[str, Any]]) -> None:
-        """POST a batch to the configured endpoint, or no-op if unset."""
-        if not self._endpoint or not records:
+        """POST a batch to the ingestion endpoint."""
+        if not records:
             return
         try:
             import urllib.request
