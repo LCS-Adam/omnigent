@@ -38,17 +38,19 @@ def polly_spec() -> AgentSpec:
 
 def test_orchestrator_executor(polly_spec: AgentSpec) -> None:
     """
-    The orchestrator runs on claude-sdk with a 1M window and a Sonnet 5 pin
-    for faster planning. Auth still comes from whatever Claude provider the
-    user configured via ``omnigent setup --no-internal-beta`` (Anthropic key,
-    subscription, gateway, or Databricks) — the pin is the bare vendor id
-    ``claude-sonnet-5``, not a Databricks-only endpoint name.
+    The orchestrator runs on claude-sdk with a 1M window and a ``sonnet``
+    alias pin for faster planning. Auth still comes from whatever Claude
+    provider the user configured via ``omnigent setup --no-internal-beta``
+    (Anthropic key, subscription, gateway, or Databricks). The pin is Claude
+    Code's version-agnostic ``sonnet`` alias — concrete ``claude-sonnet-*``
+    ids 404 under API-key auth, while ``sonnet`` resolves to the provider's
+    current Sonnet.
 
     The old ``databricks-gpt-5-4`` fallback crash that an accidental GPT pin
     papered over is fixed at the root in ``chat.py``
     ``_spec_declares_harness_or_model``, which recognizes the nested
     ``executor.config.harness`` and so never injects the ad-hoc default.
-    Fail here if the Sonnet 5 pin regresses or a Databricks-only id sneaks in.
+    Fail here if the ``sonnet`` pin regresses or a Databricks-only id sneaks in.
 
     Reads ``executor.config.harness`` (not a flat ``harness:``) because this
     is a bundle: a regression that drops the harness into a flat key would
@@ -57,9 +59,9 @@ def test_orchestrator_executor(polly_spec: AgentSpec) -> None:
     assert polly_spec.name == "polly"
     ex = polly_spec.executor
     assert ex.config.get("harness") == "claude-sdk"
-    # Faster planning pin — bare Claude id so Anthropic / gateway / Databricks
-    # auth still resolve. A Databricks-only id here would re-couple OSS.
-    assert ex.model == "claude-sonnet-5"
+    # Faster planning pin — Claude Code alias so Anthropic / gateway /
+    # Databricks auth still resolve. A Databricks-only id here would re-couple OSS.
+    assert ex.model == "sonnet"
     # Profile is intentionally NOT pinned either.
     assert ex.profile is None
     assert ex.context_window == 1000000
@@ -97,7 +99,7 @@ def test_coding_subagents(polly_spec: AgentSpec) -> None:
     # Headless bypass knobs so workers don't stall on ApprovalCards.
     by_name = {a.name: a for a in polly_spec.sub_agents}
     assert by_name["claude_code"].executor.config.get("permission_mode") == "auto"
-    assert by_name["claude_code"].executor.model == "claude-sonnet-5"
+    assert by_name["claude_code"].executor.model == "sonnet"
     assert by_name["codex"].executor.config.get("yolo") in (True, "True", "true")
     assert by_name["cursor"].executor.config.get("yolo") in (True, "True", "true")
     assert by_name["cursor"].executor.model == "cursor-grok-4.5-high"

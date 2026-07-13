@@ -1701,7 +1701,7 @@ def test_apply_overrides_harness_only_clears_pinned_model() -> None:
     """
     ``--harness`` alone drops a prior ``executor.model`` pin.
 
-    Polly pins Sonnet 5 on its claude-sdk brain; swapping the brain to
+    Polly pins ``sonnet`` on its claude-sdk brain; swapping the brain to
     ``pi`` / ``openai-agents`` must not leave that Claude id behind for a
     harness that can't run it. Pair with ``--model`` to keep a pin.
     """
@@ -1711,7 +1711,7 @@ def test_apply_overrides_harness_only_clears_pinned_model() -> None:
         "prompt": "orchestrate",
         "executor": {
             "type": "omnigent",
-            "model": "claude-sonnet-5",
+            "model": "sonnet",
             "config": {"harness": "claude-sdk"},
         },
     }

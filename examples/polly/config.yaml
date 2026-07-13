@@ -22,12 +22,15 @@ spawn: true
 # Markdown / text edits, skills) itself. Auth still comes from whatever Claude
 # provider is configured as the default (`omnigent setup --no-internal-beta`) —
 # an Anthropic API key, a Claude subscription, an OpenAI-compatible gateway, or
-# a Databricks workspace — but the brain is pinned to Sonnet 5 for faster
-# planning turns (override with ``/model`` or ``-m``).
+# a Databricks workspace — but the brain is pinned to Claude Code's ``sonnet``
+# alias (faster than the catalog Opus default). Use the version-agnostic alias,
+# not a concrete ``claude-sonnet-*`` id: bare dated/full ids 404 under API-key
+# auth, while ``sonnet`` resolves to the provider's current Sonnet. Override
+# with ``/model`` or ``-m`` (e.g. ``sonnet_5`` when the custom slot is wired).
 executor:
   type: omnigent
   context_window: 1000000
-  model: claude-sonnet-5
+  model: sonnet
   config:
     harness: claude-sdk
 

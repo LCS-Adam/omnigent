@@ -3232,7 +3232,7 @@ def _apply_overrides_to_raw(raw: _YamlMapping, overrides: ChatOverrides) -> None
         # A harness-only override drops any prior model pin so the new
         # harness resolves its provider default — e.g. ``omnigent run
         # examples/polly --harness pi`` must not keep Polly's Claude-only
-        # ``executor.model: claude-sonnet-5``. An explicit ``--model``
+        # ``executor.model: sonnet``. An explicit ``--model``
         # (applied above) wins and is left alone.
         if overrides.model is None:
             executor_block.pop("model", None)
