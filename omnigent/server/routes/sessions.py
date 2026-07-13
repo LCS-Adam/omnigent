@@ -12576,25 +12576,33 @@ async def _create_session_from_existing_agent(
         await asyncio.to_thread(conversation_store.set_labels, conv.id, body.labels)
 
     # Emit session.created exactly once at creation time.
+    # Best-effort: skip if the runner's host opted out via HelloFrame.
     try:
         import hashlib as _hashlib
 
-        _install_id = _get_installation_id()
-        _anon_uid: str | None = None
-        if user_id is not None:
-            _anon_uid = _hashlib.sha256(user_id.encode()).hexdigest()[:16]
-        _tel_emit(
-            _TelSessionCreatedEvent(
-                session_id=conv.id,
-                agent_id=agent.id,
-                harness=native_agent.harness if native_agent is not None else None,
-                surface=_classify_surface(request.headers.get("user-agent")),
-                installation_id=_install_id,
-                anon_user_id=_anon_uid,
-                is_fork=body.parent_session_id is not None,
-                is_sub_agent=body.sub_agent_name is not None,
-            )
+        _tr: TunnelRegistry | None = getattr(request.app.state, "tunnel_registry", None)
+        _runner_opted_out = (
+            _tr is not None
+            and conv.runner_id is not None
+            and _tr.is_runner_telemetry_opted_out(conv.runner_id)
         )
+        if not _runner_opted_out:
+            _install_id = _get_installation_id()
+            _anon_uid: str | None = None
+            if user_id is not None:
+                _anon_uid = _hashlib.sha256(user_id.encode()).hexdigest()[:16]
+            _tel_emit(
+                _TelSessionCreatedEvent(
+                    session_id=conv.id,
+                    agent_id=agent.id,
+                    harness=native_agent.harness if native_agent is not None else None,
+                    surface=_classify_surface(request.headers.get("user-agent")),
+                    installation_id=_install_id,
+                    anon_user_id=_anon_uid,
+                    is_fork=body.parent_session_id is not None,
+                    is_sub_agent=body.sub_agent_name is not None,
+                )
+            )
     except Exception:  # noqa: BLE001 — telemetry must not disrupt session creation
         pass
 

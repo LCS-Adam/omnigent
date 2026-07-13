@@ -583,16 +583,13 @@ async def _send_hello(
         frame, e.g. ``"0.1.0"``.
     :returns: None.
     """
-    # Include the runner's installation ID for server-side telemetry
-    # correlation.  Omit when telemetry is disabled so the server can
-    # tell the runner opted out.
-    _installation_id: str | None = None
+    # Signal host-side telemetry opt-out to the server so it can honour
+    # it on a best-effort basis when emitting session events.
+    _tel_opt_out = False
     try:
         from omnigent.telemetry.client import is_disabled as _tel_disabled
-        from omnigent.telemetry.installation_id import get_installation_id as _get_id
 
-        if not _tel_disabled():
-            _installation_id = _get_id()
+        _tel_opt_out = _tel_disabled()
     except Exception:  # noqa: BLE001 — telemetry errors must not abort hello
         pass
 
@@ -601,6 +598,7 @@ async def _send_hello(
             HelloFrame(
                 runner_version=runner_version,
                 frame_protocol_version=1,
+                telemetry_opt_out=_tel_opt_out,
                 harnesses=[
                     "claude-native",
                     "claude-sdk",
@@ -610,7 +608,6 @@ async def _send_hello(
                     "pi",
                 ],
                 envs=["os_sandbox"],
-                installation_id=_installation_id,
             )
         )
     )

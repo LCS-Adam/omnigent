@@ -354,17 +354,18 @@ class TunnelRegistry:
         with self._lock:
             return self._sessions.get(runner_id)
 
-    def get_runner_installation_id(self, runner_id: str) -> str | None:
-        """Return the installation ID the runner advertised in its hello frame.
+    def is_runner_telemetry_opted_out(self, runner_id: str) -> bool:
+        """Return whether the runner's host has opted out of telemetry.
 
         :param runner_id: Runner id, e.g. ``"runner_0123456789abcdef"``.
-        :returns: The runner's installation ID, or ``None`` when the
-            runner is offline or sent no installation ID.
+        :returns: ``True`` when the runner sent ``telemetry_opt_out=True``
+            in its hello frame, or when the runner is offline (unknown
+            runners default to not opted out).
         """
         session = self.get(runner_id)
         if session is None:
-            return None
-        return session.hello.installation_id
+            return False
+        return session.hello.telemetry_opt_out
 
     async def wait_for_runner(
         self,
