@@ -180,6 +180,62 @@ def test_list_latest_message_items_for_conversations(
     assert result["conv_missing"] == []
 
 
+def test_ranked_latest_message_items_omits_search_text(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """The ranked-message subquery must not select the heavy ``search_text``
+    column — the preview caller never reads it, and pulling it roughly doubles
+    the bytes transferred per row on a chatty child.
+
+    Guards the projection so a future refactor can't silently go back to
+    ``select(SqlConversationItem)`` (the whole row). Also seeds a message whose
+    ``search_text`` differs from its visible text and asserts the returned item
+    still carries the visible text, proving the preview reads ``data``.
+    """
+    from omnigent.stores.conversation_store.sqlalchemy_store import (
+        _ranked_latest_message_items,
+    )
+
+    ranked = _ranked_latest_message_items(["conv_x"])
+    columns = {c.key for c in ranked.c}
+    assert "search_text" not in columns
+    # The columns _to_item + the preview actually consume must all be present.
+    assert {
+        "conversation_id",
+        "id",
+        "response_id",
+        "created_at",
+        "status",
+        "position",
+        "type",
+        "data",
+        "created_by",
+        "row_num",
+    } <= columns
+
+    conv = conversation_store.create_conversation(title="chatty")
+    conversation_store.append(
+        conv.id,
+        [
+            NewConversationItem(
+                type="message",
+                response_id="resp_x",
+                data=MessageData(
+                    role="assistant",
+                    content=[{"type": "output_text", "text": "visible reply"}],
+                    agent="worker",
+                ),
+            )
+        ],
+    )
+    result = conversation_store.list_latest_message_items_for_conversations(
+        [conv.id], per_conversation_limit=1
+    )
+    item = result[conv.id][0]
+    assert isinstance(item.data, MessageData)
+    assert item.data.content[0]["text"] == "visible reply"
+
+
 def test_update_title(conversation_store: SqlAlchemyConversationStore) -> None:
     conv = conversation_store.create_conversation()
     updated = conversation_store.update_conversation(conv.id, title="Chat 1")

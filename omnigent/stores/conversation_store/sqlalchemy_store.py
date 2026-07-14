@@ -597,20 +597,31 @@ def _ranked_latest_message_items(conversation_ids: list[str]) -> Subquery:
     """
     Build a ranked latest-message subquery for multiple conversations.
 
-    Selects all ``SqlConversationItem`` columns plus a per-conversation
-    ``row_num`` so the caller can filter to the top-N rows without a
-    join back to the base table. Avoiding the join is critical: the
-    primary key is ``(workspace_id, conversation_id, id)``, so a join
-    on ``id`` alone forces a full table scan.
+    Selects only the columns :func:`_to_item` needs (plus ``conversation_id``
+    and ``position`` for grouping/ordering) and a per-conversation ``row_num``
+    so the caller can filter to the top-N rows without a join back to the base
+    table. Avoiding the join is critical: the primary key is
+    ``(workspace_id, conversation_id, id)``, so a join on ``id`` alone forces a
+    full table scan. The heavy ``search_text`` column is deliberately omitted —
+    the message-preview caller never reads it, and it roughly doubles the bytes
+    pulled per row on a chatty conversation.
 
     :param conversation_ids: Conversation ids to fetch messages for,
         e.g. ``["conv_child1", "conv_child2"]``.
-    :returns: SQLAlchemy subquery with all item columns plus per-conversation
-        ``row_num``, newest message first.
+    :returns: SQLAlchemy subquery with the projected item columns plus
+        per-conversation ``row_num``, newest message first.
     """
     return (
         select(
-            SqlConversationItem,
+            SqlConversationItem.conversation_id,
+            SqlConversationItem.id,
+            SqlConversationItem.response_id,
+            SqlConversationItem.created_at,
+            SqlConversationItem.status,
+            SqlConversationItem.position,
+            SqlConversationItem.type,
+            SqlConversationItem.data,
+            SqlConversationItem.created_by,
             func.row_number()
             .over(
                 partition_by=SqlConversationItem.conversation_id,
