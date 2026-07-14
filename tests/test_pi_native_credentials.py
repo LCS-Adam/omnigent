@@ -873,20 +873,29 @@ def test_cli_config_databricks_registers_gpt_provider(
     """
     _write_codex_config(tmp_path, _DATABRICKS_CODEX_CONFIG)
     monkeypatch.setenv("HOME", str(tmp_path))
-    # Stub resolve_databricks_workspace (no real .databrickscfg in CI) and
-    # the live fetch.
+    # Workspace URL comes from resolve_databricks_workspace (DEFAULT profile),
+    # but the token for the API call comes from the auth_command — the SDK's
+    # minted token may not have serving-endpoints access.
     from omnigent.runtime.credentials import databricks as db_creds_mod
 
     monkeypatch.setattr(
         db_creds_mod,
         "resolve_databricks_workspace",
         lambda profile: db_creds_mod.WorkspaceCreds(
-            host="https://dbc-a5d4177a-49dc.cloud.databricks.com", token="tok"
+            host="https://dbc-a5d4177a-49dc.cloud.databricks.com", token="sdk-tok"
         ),
     )
+    monkeypatch.setattr(creds, "_run_auth_command", lambda *_: "cmd-tok")
     live_gpt = [{"id": "databricks-gpt-5-4", "input": ["text", "image"]}]
     live_claude = [{"id": "databricks-claude-sonnet-4-6", "input": ["text", "image"]}]
-    monkeypatch.setattr(creds, "_fetch_pi_model_lists", lambda *_: (live_claude, live_gpt))
+
+    def _mock_fetch(workspace_url: str, token: str):
+        # Assert the auth_command token is used, not the SDK token
+        assert token == "cmd-tok", f"expected auth_command token, got {token!r}"
+        assert "dbc-a5d4177a" in workspace_url
+        return live_claude, live_gpt
+
+    monkeypatch.setattr(creds, "_fetch_pi_model_lists", _mock_fetch)
 
     provider = creds.resolve_pi_native_provider(config_loader=_cli_config_databricks_config)
     assert provider is not None

@@ -510,23 +510,30 @@ def _cli_config_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiPro
     api_key = f"!{transport.auth_command}"
     # The AI Gateway hostname (e.g. ``<id>.ai-gateway.cloud.databricks.com``)
     # is NOT the workspace hostname — stripping ``ai-gateway.`` produces an
-    # NXDOMAIN. Instead, resolve workspace credentials from the DEFAULT
-    # ~/.databrickscfg profile, which is what cli-config users have. Fall back
-    # gracefully (empty model lists → Pi shows only the selected model).
+    # NXDOMAIN. Use resolve_databricks_workspace for the real workspace URL,
+    # but use the auth_command token (same credential the gateway uses) for
+    # the API call. The SDK's minted token may not have serving-endpoints
+    # access on workspaces where access is controlled via the auth command.
     claude_models: list[dict[str, Any]] = []
     openai_models: list[dict[str, Any]] = []
     real_workspace_url: str | None = None
     try:
         from omnigent.runtime.credentials.databricks import resolve_databricks_workspace
 
-        ws_creds = resolve_databricks_workspace(None)
-        real_workspace_url = ws_creds.host
-        claude_models, openai_models = _fetch_pi_model_lists(ws_creds.host, ws_creds.token)
-    except Exception:  # noqa: BLE001 — credential/network failure must not break launch
+        real_workspace_url = resolve_databricks_workspace(None).host
+    except Exception:  # noqa: BLE001 — no .databrickscfg → skip listing
         _LOGGER.info(
-            "pi-native: cli-config path could not resolve workspace credentials "
+            "pi-native: cli-config path could not resolve workspace URL "
             "for model listing; Pi will show only the selected model"
         )
+    if real_workspace_url and transport.auth_command:
+        token = _run_auth_command(transport.auth_command)
+        if token:
+            claude_models, openai_models = _fetch_pi_model_lists(real_workspace_url, token)
+        else:
+            _LOGGER.info(
+                "pi-native: auth command produced no token; Pi will show only the selected model"
+            )
     additional: dict[str, Any] = (
         {
             _PI_OPENAI_PROVIDER_ID: _databricks_openai_provider(
