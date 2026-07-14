@@ -46,14 +46,12 @@ from omnigent.native_policy_hook import (
 # ``_CLAUDE_NATIVE_PERMISSION_HOOK_TIMEOUT_S`` and Claude Code's own
 # command-hook ``timeout`` so no single layer caps the wait early.
 #
-# NOTE: this bounds a SINGLE long-poll (a slow human), NOT the retry loop.
-# Re-POST attempts after a *failure* are bounded separately by
+# NOTE: this bounds a SINGLE long-poll, NOT the retry loop. Re-POST
+# attempts after a *failure* are bounded separately by
 # ``_PERMISSION_MAX_CONSECUTIVE_FAILURES`` — see :func:`_post_hook_with_reattach`.
-# Before #1782 the retry deadline was also one day, so a persistently
-# sick/unreachable server made the hook re-POST (each re-driving the turn and
-# respawning harness/tool subprocesses) every ≤30s for 24h — the spin-loop half
-# of the zombie pileup.
-_PERMISSION_TIMEOUT_S = 86400.0
+# 30-second circuit breaker: if no verdict arrives the server returns
+# an explicit deny, so the hook subprocess relays that deny decision.
+_PERMISSION_TIMEOUT_S = 30.0
 # First retry must land inside the server's re-park grace (proxies
 # sever idle long-polls); later retries back off.
 _PERMISSION_RETRY_INITIAL_BACKOFF_S = 1.0

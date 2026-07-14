@@ -1236,14 +1236,11 @@ def build_hook_settings(
         permission_hook: dict[str, Any] = {
             "type": "command",
             "command": shlex.join(permission_command_parts),
-            # Wait up to a day for the verdict. Claude Code's default
-            # command-hook timeout (~60s) would otherwise kill the hook
-            # subprocess long before the user answers, putting the
-            # prompt back in the TUI and flipping the web card to
-            # "Resolved elsewhere". A day is effectively wait-forever
-            # for an interactive permission prompt; it stays in lockstep
-            # with the subprocess/AP-side budgets so none caps first.
-            "timeout": 86400,
+            # 30-second circuit breaker: if no web verdict arrives the
+            # server returns an explicit deny, failing the tool call.
+            # Kept in lockstep with the subprocess/AP-side budgets so
+            # no single layer caps the wait first.
+            "timeout": 30,
         }
         hooks["PermissionRequest"] = [{"hooks": [permission_hook]}]
 
