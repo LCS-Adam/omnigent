@@ -1060,6 +1060,11 @@ async def test_child_sessions_per_child_fields_isolated_across_fanout(
         monkeypatch.setattr(SqlAlchemyConversationStore, "list_items", _fail_list_items)
         # Default limit is 20, so all eight come back in one page.
         resp = await client.get(f"/v1/sessions/{session['id']}/child_sessions")
+        # Restore the class method immediately after the response is received so
+        # that any lingering background asyncio.to_thread calls (which may
+        # outlive this test's fixture teardown) don't observe the sentinel and
+        # cause spurious failures in subsequent tests.
+        monkeypatch.undo()
         assert resp.status_code == 200
         rows = resp.json()["data"]
         # All seeded children present — a short page would mean the
