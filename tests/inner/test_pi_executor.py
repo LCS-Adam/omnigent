@@ -445,6 +445,24 @@ class TestBuildModelsJson(unittest.TestCase):
         entry = next(e for e in provider["models"] if e["id"] == model)
         self.assertEqual(entry.get("input"), ["text", "image"])
 
+    def test_dynamic_reasoning_model_gets_reasoning_flag(self):
+        # GLM/DeepSeek stream their output on ``reasoning_content``;
+        # without ``reasoning: true`` Pi's openai-completions parser never
+        # consumes that channel and the turn dies with "Stream ended without
+        # finish_reason".
+        for model in ("databricks-glm-5-2", "databricks-deepseek-r1"):
+            result = _build_models_json("https://host.example.com", "tok", model=model)
+            provider = result["providers"][_pi_provider_for_model(model)]
+            entry = next(e for e in provider["models"] if e["id"] == model)
+            self.assertIs(entry.get("reasoning"), True, model)
+
+    def test_dynamic_non_reasoning_model_has_no_reasoning_flag(self):
+        model = "databricks-gemini-2-5-pro"
+        result = _build_models_json("https://host.example.com", "tok", model=model)
+        provider = result["providers"][_pi_provider_for_model(model)]
+        entry = next(e for e in provider["models"] if e["id"] == model)
+        self.assertNotIn("reasoning", entry)
+
     def test_static_model_declared_image_capable(self):
         # #516 review: a STATIC (pre-registered) vision model must also
         # advertise image input. The dynamic-registration append is gated on

@@ -809,11 +809,26 @@ def _build_models_json(
             # provider-side 400 on image turns — a deliberate trade (loud error
             # over silent loss), since most current gateway models are
             # multimodal and text-only turns are unaffected.
-            provider["models"] = [
-                *provider["models"],
-                {"id": model, "input": ["text", "image"]},
-            ]
+            entry: dict[str, Any] = {"id": model, "input": ["text", "image"]}  # type: ignore[explicit-any]
+            if _pi_model_is_reasoning(model):
+                entry["reasoning"] = True
+            provider["models"] = [*provider["models"], entry]
     return config
+
+
+# Model-id fragments of completions-gateway models that stream their output on
+# the ``reasoning_content`` channel (GLM, DeepSeek-R1, ...). Pi's
+# openai-completions parser only consumes that channel when the model entry
+# declares ``reasoning: true``; without it the stream carries no ``content``
+# and the turn dies with "Stream ended without finish_reason". Extend this
+# tuple when the gateway grows another reasoning-first model family.
+_PI_REASONING_MODEL_FRAGMENTS: tuple[str, ...] = ("glm", "deepseek")
+
+
+def _pi_model_is_reasoning(model: str) -> bool:
+    """Return whether *model* needs Pi's ``reasoning: true`` model flag."""
+    lower = model.lower()
+    return any(fragment in lower for fragment in _PI_REASONING_MODEL_FRAGMENTS)
 
 
 def _pi_provider_for_model(model: str) -> str:
