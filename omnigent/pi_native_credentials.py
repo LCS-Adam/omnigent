@@ -261,6 +261,21 @@ def _databricks_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiPro
     host = host.rstrip("/")
     auth_command = _databricks_codex_auth_command(host, entry.profile)
     api_key = f"!{auth_command}"
+    # Fetch the live model list from the workspace API so Pi's /model shows
+    # exactly the endpoints available on this workspace. Falls back to the
+    # bundled static lists when credentials can't be resolved or the API call
+    # fails (e.g. network blip, new workspace with no endpoints yet).
+    try:
+        from omnigent.runtime.credentials.databricks import resolve_databricks_workspace
+
+        creds = resolve_databricks_workspace(entry.profile)
+        claude_models, gpt_models, _ = _fetch_pi_model_lists(creds.host, creds.token)
+    except Exception:  # noqa: BLE001 — credential/network failure must not break launch
+        _LOGGER.info(
+            "pi-native: falling back to bundled model list (could not resolve credentials)"
+        )
+        claude_models = list(_DATABRICKS_ANTHROPIC_NATIVE_MODELS)
+        gpt_models = list(_DATABRICKS_RESPONSES_NATIVE_MODELS)
     return PiProviderConfig(
         provider_id=_PI_PROVIDER_ID,
         base_url=f"{host}{_DATABRICKS_ANTHROPIC_GATEWAY_PATH}",
@@ -271,27 +286,32 @@ def _databricks_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiPro
         # force-refreshes), matching codex-native's refresh semantics.
         api_key=api_key,
         auth_header=True,
-        extra_models=list(_DATABRICKS_ANTHROPIC_NATIVE_MODELS),
-        additional_providers={
-            _PI_OPENAI_PROVIDER_ID: _databricks_openai_provider(
-                api_key, f"{host}/serving-endpoints"
-            )
-        },
+        extra_models=claude_models,
+        additional_providers=(
+            {
+                _PI_OPENAI_PROVIDER_ID: _databricks_openai_provider(
+                    api_key, f"{host}/serving-endpoints", gpt_models
+                )
+            }
+            if gpt_models
+            else {}
+        ),
     )
 
 
-def _gateway_serving_endpoints_url(gateway_base_url: str) -> str | None:
-    """Derive the Databricks workspace serving-endpoints URL from a gateway URL.
+def _gateway_workspace_url(gateway_base_url: str) -> str | None:
+    """Derive the Databricks workspace base URL from an AI Gateway URL.
 
     The AI Gateway hostname carries an ``ai-gateway`` DNS label that the
     workspace host does not (e.g. ``12345.ai-gateway.cloud.databricks.com`` →
-    ``12345.cloud.databricks.com``). GPT models route through the workspace's
-    ``/serving-endpoints`` path, not the gateway itself.
+    ``12345.cloud.databricks.com``). The workspace URL is the root for both
+    ``/api/2.0/serving-endpoints`` (model catalog) and ``/serving-endpoints``
+    (OpenAI Completions base URL).
 
     :param gateway_base_url: An AI Gateway base URL, e.g.
         ``"https://<id>.ai-gateway.cloud.databricks.com/codex/v1"``.
-    :returns: ``https://<workspace>/serving-endpoints``, or ``None`` when the
-        URL doesn't carry the expected ``ai-gateway`` label.
+    :returns: ``https://<workspace>``, or ``None`` when the URL doesn't carry
+        the expected ``ai-gateway`` label.
     """
     parsed = urlparse(gateway_base_url)
     if not parsed.hostname:
@@ -300,10 +320,14 @@ def _gateway_serving_endpoints_url(gateway_base_url: str) -> str | None:
     if _DATABRICKS_AI_GATEWAY_LABEL not in labels:
         return None
     labels.remove(_DATABRICKS_AI_GATEWAY_LABEL)
-    return f"https://{'.'.join(labels)}/serving-endpoints"
+    return f"https://{'.'.join(labels)}"
 
 
-def _databricks_openai_provider(api_key: str, serving_endpoints_url: str) -> dict[str, Any]:
+def _databricks_openai_provider(
+    api_key: str,
+    serving_endpoints_url: str,
+    models: list[dict[str, Any]],
+) -> dict[str, Any]:
     """Build a Pi OpenAI Completions provider config for the Databricks gateway.
 
     GPT models on the Databricks workspace are served via the OpenAI
@@ -320,8 +344,127 @@ def _databricks_openai_provider(api_key: str, serving_endpoints_url: str) -> dic
             "supportsStrictMode": False,
             "supportsReasoningEffort": False,
         },
-        "models": list(_DATABRICKS_RESPONSES_NATIVE_MODELS),
+        "models": models,
     }
+
+
+def _run_auth_command(auth_command: str, *, timeout: float = 15.0) -> str | None:
+    """Run *auth_command* and return its stdout as a bearer token.
+
+    Used to obtain a short-lived token at session-create time for the
+    one-shot model-catalog API call. Returns ``None`` on any failure so
+    callers can fall back gracefully.
+
+    :param auth_command: Shell command string, e.g.
+        ``"jq -r .access_token /path/token.json"``.
+    :param timeout: Maximum seconds to wait for the command.
+    :returns: Stripped stdout (the token), or ``None`` when the command
+        fails, times out, or produces empty output.
+    """
+    import shlex
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            shlex.split(auth_command),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+    except Exception:  # noqa: BLE001 — any subprocess failure should just return None
+        return None
+
+
+def _fetch_pi_model_lists(
+    workspace_url: str,
+    token: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Fetch live model lists from the Databricks serving-endpoints API.
+
+    Calls ``GET <workspace>/api/2.0/serving-endpoints``, filters for
+    READY LLM endpoints, and splits them by family (Claude/GPT/other) into
+    Pi model entry dicts (``{"id": name, "input": ["text", "image"]}``).
+    Falls back to the bundled static lists on any HTTP or auth failure so a
+    network blip or credential gap never breaks Pi session launch.
+
+    :param workspace_url: Databricks workspace base URL, e.g.
+        ``"https://wkspc.example.com"`` — **no** trailing slash or path.
+    :param token: Bearer token for the workspace API.
+    :returns: ``(claude_models, gpt_models, other_models)`` — each a list
+        of Pi model entry dicts ready to write into ``models.json``.
+    """
+    import httpx
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(
+                f"{workspace_url.rstrip('/')}/api/2.0/serving-endpoints",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+    except Exception:  # noqa: BLE001 — any HTTP/network failure falls back to statics
+        _LOGGER.warning(
+            "pi-native: could not fetch Databricks model list; using bundled defaults",
+            exc_info=True,
+        )
+        return (
+            list(_DATABRICKS_ANTHROPIC_NATIVE_MODELS),
+            list(_DATABRICKS_RESPONSES_NATIVE_MODELS),
+            [],
+        )
+
+    endpoints = payload.get("endpoints") if isinstance(payload, dict) else None
+    claude: list[dict[str, Any]] = []
+    gpt: list[dict[str, Any]] = []
+    other: list[dict[str, Any]] = []
+
+    for endpoint in endpoints if isinstance(endpoints, list) else []:
+        if not isinstance(endpoint, dict):
+            continue
+        name = endpoint.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        # Filter to chat/completion LLM endpoints (exclude embeddings/rerankers).
+        task = endpoint.get("task", "")
+        task_lower = task.lower() if isinstance(task, str) else ""
+        name_lower = name.lower()
+        if task_lower:
+            is_llm = any(t in task_lower for t in ("chat", "completion"))
+        else:
+            is_llm = any(
+                t in name_lower
+                for t in ("claude", "gpt", "codex", "gemini", "llama", "qwen", "kimi")
+            )
+        if not is_llm:
+            continue
+        state = endpoint.get("state")
+        ready = state.get("ready") if isinstance(state, dict) else None
+        if isinstance(ready, str) and ready and ready.upper() != "READY":
+            continue
+        entry: dict[str, Any] = {"id": name, "input": ["text", "image"]}
+        if "claude" in name_lower:
+            claude.append(entry)
+        elif "gpt" in name_lower:
+            gpt.append(entry)
+        else:
+            other.append(entry)
+
+    if not claude and not gpt and not other:
+        _LOGGER.info(
+            "pi-native: Databricks serving-endpoints returned no LLM models; "
+            "using bundled defaults"
+        )
+        return (
+            list(_DATABRICKS_ANTHROPIC_NATIVE_MODELS),
+            list(_DATABRICKS_RESPONSES_NATIVE_MODELS),
+            [],
+        )
+
+    return claude, gpt, other
 
 
 def _gateway_anthropic_base_url(codex_base_url: str) -> str:
@@ -453,13 +596,26 @@ def _cli_config_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiPro
     if transport is None:
         return None
     api_key = f"!{transport.auth_command}"
-    # Derive the workspace serving-endpoints URL from the AI Gateway URL so Pi
-    # can also list GPT models. Falls back gracefully to Claude-only when the
-    # URL doesn't carry the expected ``ai-gateway`` label.
-    serving_endpoints = _gateway_serving_endpoints_url(transport.base_url)
+    # Derive the workspace base URL from the AI Gateway URL. Used for both the
+    # serving-endpoints OpenAI Completions base URL and the model-catalog API
+    # call. Falls back gracefully when the URL lacks the ai-gateway label.
+    workspace_url = _gateway_workspace_url(transport.base_url)
+    # Fetch the live model list. Run the auth command once to get the current
+    # token — Pi will refresh per request via the !command apiKey.
+    claude_models = list(_DATABRICKS_ANTHROPIC_NATIVE_MODELS)
+    gpt_models = list(_DATABRICKS_RESPONSES_NATIVE_MODELS)
+    if workspace_url and transport.auth_command:
+        token = _run_auth_command(transport.auth_command)
+        if token:
+            live_claude, live_gpt, _ = _fetch_pi_model_lists(workspace_url, token)
+            claude_models, gpt_models = live_claude, live_gpt
     additional: dict[str, Any] = (
-        {_PI_OPENAI_PROVIDER_ID: _databricks_openai_provider(api_key, serving_endpoints)}
-        if serving_endpoints
+        {
+            _PI_OPENAI_PROVIDER_ID: _databricks_openai_provider(
+                api_key, f"{workspace_url}/serving-endpoints", gpt_models
+            )
+        }
+        if workspace_url and gpt_models
         else {}
     )
     return PiProviderConfig(
@@ -472,7 +628,7 @@ def _cli_config_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiPro
         # request — matching codex-native's refresh semantics.
         api_key=api_key,
         auth_header=True,
-        extra_models=list(_DATABRICKS_ANTHROPIC_NATIVE_MODELS),
+        extra_models=claude_models,
         additional_providers=additional,
     )
 

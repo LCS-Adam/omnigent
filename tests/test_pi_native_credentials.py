@@ -880,3 +880,75 @@ def test_cli_config_databricks_registers_gpt_provider(
     gpt_ids = [m["id"] for m in openai_entry["models"]]
     assert "databricks-gpt-5-4" in gpt_ids
     assert "databricks-gpt-5-5" in gpt_ids
+
+
+def test_fetch_pi_model_lists_parses_serving_endpoints() -> None:
+    """_fetch_pi_model_lists splits live endpoints by family into Pi model dicts."""
+    import json
+    import unittest.mock
+
+    import httpx
+
+    payload = {
+        "endpoints": [
+            {
+                "name": "databricks-claude-sonnet-4-6",
+                "task": "llm/v1/chat",
+                "state": {"ready": "READY"},
+            },
+            {
+                "name": "databricks-claude-opus-4-8",
+                "task": "llm/v1/chat",
+                "state": {"ready": "READY"},
+            },
+            {"name": "databricks-gpt-5-4", "task": "llm/v1/chat", "state": {"ready": "READY"}},
+            {"name": "databricks-llama-3-70b", "task": "llm/v1/chat", "state": {"ready": "READY"}},
+            {"name": "my-embedding-model", "task": "llm/v1/embeddings"},
+            {"name": "databricks-gpt-5-5", "task": "llm/v1/chat", "state": {"ready": "NOT_READY"}},
+        ]
+    }
+
+    class _MockTransport(httpx.BaseTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            assert "/api/2.0/serving-endpoints" in str(request.url)
+            assert request.headers["authorization"].startswith("Bearer ")
+            return httpx.Response(200, content=json.dumps(payload).encode())
+
+    _real_client = httpx.Client
+    with unittest.mock.patch(
+        "httpx.Client",
+        lambda **kw: _real_client(transport=_MockTransport()),
+    ):
+        claude, gpt, other = creds._fetch_pi_model_lists("https://wkspc.example.com", "tok")
+
+    assert [m["id"] for m in claude] == [
+        "databricks-claude-sonnet-4-6",
+        "databricks-claude-opus-4-8",
+    ]
+    assert [m["id"] for m in gpt] == ["databricks-gpt-5-4"]
+    assert [m["id"] for m in other] == ["databricks-llama-3-70b"]
+    assert all(m.get("input") == ["text", "image"] for m in claude + gpt + other)
+
+
+def test_fetch_pi_model_lists_falls_back_on_http_error() -> None:
+    """_fetch_pi_model_lists returns static defaults when the API call fails."""
+    import unittest.mock
+
+    import httpx
+
+    class _ErrorTransport(httpx.BaseTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401)
+
+    _real_client = httpx.Client
+    with unittest.mock.patch(
+        "httpx.Client",
+        lambda **kw: _real_client(transport=_ErrorTransport()),
+    ):
+        claude, gpt, _ = creds._fetch_pi_model_lists("https://wkspc.example.com", "bad-tok")
+
+    claude_ids = [m["id"] for m in claude]
+    assert "databricks-claude-sonnet-4-6" in claude_ids
+    assert "databricks-claude-opus-4-8" in claude_ids
+    gpt_ids = [m["id"] for m in gpt]
+    assert "databricks-gpt-5-4" in gpt_ids
