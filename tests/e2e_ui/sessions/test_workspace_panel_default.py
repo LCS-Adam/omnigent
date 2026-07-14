@@ -78,7 +78,9 @@ def test_workspace_panel_default_control_defaults_and_persists(
     expect(page.get_by_test_id("workspace-panel-default-collapsed")).to_have_attribute(
         "aria-checked", "true"
     )
-    assert _stored_default(page) == "collapsed", "the Workspace panel default did not survive a reload"
+    assert _stored_default(page) == "collapsed", (
+        "the Workspace panel default did not survive a reload"
+    )
 
 
 def test_new_chat_follows_workspace_panel_default(

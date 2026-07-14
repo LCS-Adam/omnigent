@@ -745,9 +745,7 @@ export function AppShell() {
       viewParam === "changed" ||
       viewParam === "explore" ||
       (commentParam !== null && commentParam !== "");
-    setRightPanelOpen(
-      (persisted.open ?? readDefaultWorkspacePanelOpen()) || hasWorkspaceUrlSignal,
-    );
+    setRightPanelOpen((persisted.open ?? readDefaultWorkspacePanelOpen()) || hasWorkspaceUrlSignal);
 
     stateConvRef.current = conversationId;
   }, [conversationId]); // eslint-disable-line react-hooks/exhaustive-deps
