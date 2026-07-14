@@ -824,3 +824,59 @@ def test_inline_family_passes_non_mechanical_override_through() -> None:
     assert provider.model == "zai-org/GLM-4.7"
     cfg = provider.to_models_config()
     assert cfg["providers"]["omnigent"]["models"] == [{"id": "zai-org/GLM-4.7"}]
+
+
+def test_databricks_profile_registers_gpt_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Databricks profile provider includes an OpenAI Completions provider for GPT models.
+
+    The ``omnigent-openai`` provider targets ``/serving-endpoints`` so Pi's
+    /model command exposes GPT models alongside the Claude models.
+    """
+    from omnigent.inner import databricks_executor
+
+    monkeypatch.setattr(
+        databricks_executor,
+        "_read_databrickscfg_host",
+        lambda profile: "https://wkspc.example.com/",
+    )
+
+    provider = creds.resolve_pi_native_provider(config_loader=_databricks_config)
+    assert provider is not None
+
+    cfg = provider.to_models_config()
+    openai_entry = cfg["providers"].get("omnigent-openai")
+    assert openai_entry is not None, "omnigent-openai provider missing from models.json"
+    assert openai_entry["baseUrl"] == "https://wkspc.example.com/serving-endpoints"
+    assert openai_entry["api"] == "openai-completions"
+    gpt_ids = [m["id"] for m in openai_entry["models"]]
+    assert "databricks-gpt-5-4" in gpt_ids
+    assert "databricks-gpt-5-5" in gpt_ids
+
+
+def test_cli_config_databricks_registers_gpt_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A cli-config Databricks AI Gateway provider also registers GPT models.
+
+    The workspace serving-endpoints URL is derived from the AI Gateway URL by
+    removing the ``ai-gateway`` DNS label, so GPT models appear alongside
+    Claude models in Pi's /model output.
+    """
+    _write_codex_config(tmp_path, _DATABRICKS_CODEX_CONFIG)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    provider = creds.resolve_pi_native_provider(config_loader=_cli_config_databricks_config)
+    assert provider is not None
+
+    cfg = provider.to_models_config()
+    openai_entry = cfg["providers"].get("omnigent-openai")
+    assert openai_entry is not None, "omnigent-openai provider missing from models.json"
+    # ai-gateway. label stripped from the gateway hostname → workspace serving-endpoints
+    assert (
+        openai_entry["baseUrl"]
+        == "https://1965859176160743.cloud.databricks.com/serving-endpoints"
+    )
+    assert openai_entry["api"] == "openai-completions"
+    gpt_ids = [m["id"] for m in openai_entry["models"]]
+    assert "databricks-gpt-5-4" in gpt_ids
+    assert "databricks-gpt-5-5" in gpt_ids

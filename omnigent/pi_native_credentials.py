@@ -63,6 +63,10 @@ _PI_PROVIDER_ID = "omnigent"
 # carries no explicit model override.
 _DATABRICKS_PI_DEFAULT_MODEL = "databricks-claude-sonnet-4-6"
 
+# Provider id for the secondary OpenAI Completions provider registered alongside
+# the primary Anthropic provider in Databricks gateway configs.
+_PI_OPENAI_PROVIDER_ID = "omnigent-openai"
+
 # All Claude models available on the Databricks AI Gateway Anthropic surface.
 # Keep in sync with _DATABRICKS_ANTHROPIC_MODELS in omnigent/inner/pi_executor.py.
 # Declaring ``input`` is required so Pi's transformMessages doesn't strip
@@ -87,6 +91,39 @@ _DATABRICKS_ANTHROPIC_NATIVE_MODELS: list[dict[str, Any]] = [
         "name": "Claude Sonnet 4.5",
         "contextWindow": 200000,
         "maxTokens": 16384,
+        "input": ["text", "image"],
+    },
+]
+
+# GPT models available on the Databricks workspace serving-endpoints.
+# Keep in sync with _DATABRICKS_RESPONSES_MODELS in omnigent/inner/pi_executor.py.
+_DATABRICKS_RESPONSES_NATIVE_MODELS: list[dict[str, Any]] = [
+    {
+        "id": "databricks-gpt-5-4-mini",
+        "name": "GPT-5.4 Mini",
+        "contextWindow": 1047576,
+        "maxTokens": 32768,
+        "input": ["text", "image"],
+    },
+    {
+        "id": "databricks-gpt-5-4",
+        "name": "GPT-5.4",
+        "contextWindow": 1047576,
+        "maxTokens": 32768,
+        "input": ["text", "image"],
+    },
+    {
+        "id": "databricks-gpt-5-5",
+        "name": "GPT-5.5",
+        "contextWindow": 400000,
+        "maxTokens": 128000,
+        "input": ["text", "image"],
+    },
+    {
+        "id": "databricks-gpt-5-5-pro",
+        "name": "GPT-5.5 Pro",
+        "contextWindow": 400000,
+        "maxTokens": 128000,
         "input": ["text", "image"],
     },
 ]
@@ -177,6 +214,10 @@ class PiProviderConfig:
     # Databricks Anthropic gateway). Excluded from __hash__ so the frozen
     # dataclass stays hashable even though list[dict] is not hashable.
     extra_models: list[dict[str, Any]] = field(default_factory=list, hash=False)
+    # Extra providers to merge into models.json alongside the primary one (e.g.
+    # an OpenAI Completions provider for GPT models on the Databricks gateway).
+    # Keys are provider ids; values are complete Pi provider config dicts.
+    additional_providers: dict[str, Any] = field(default_factory=dict, hash=False)
 
     def to_models_config(self) -> dict[str, Any]:
         """Render this provider as a Pi ``models.json`` mapping."""
@@ -196,7 +237,9 @@ class PiProviderConfig:
         }
         if self.auth_header:
             provider["authHeader"] = True
-        return {"providers": {self.provider_id: provider}}
+        providers: dict[str, Any] = {self.provider_id: provider}
+        providers.update(self.additional_providers)
+        return {"providers": providers}
 
 
 def _databricks_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiProviderConfig | None:
@@ -217,6 +260,7 @@ def _databricks_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiPro
         return None
     host = host.rstrip("/")
     auth_command = _databricks_codex_auth_command(host, entry.profile)
+    api_key = f"!{auth_command}"
     return PiProviderConfig(
         provider_id=_PI_PROVIDER_ID,
         base_url=f"{host}{_DATABRICKS_ANTHROPIC_GATEWAY_PATH}",
@@ -225,10 +269,59 @@ def _databricks_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiPro
         # Pi resolves a "!command" apiKey at request time, so the gateway
         # bearer token is refreshed per request (the auth command itself
         # force-refreshes), matching codex-native's refresh semantics.
-        api_key=f"!{auth_command}",
+        api_key=api_key,
         auth_header=True,
         extra_models=list(_DATABRICKS_ANTHROPIC_NATIVE_MODELS),
+        additional_providers={
+            _PI_OPENAI_PROVIDER_ID: _databricks_openai_provider(
+                api_key, f"{host}/serving-endpoints"
+            )
+        },
     )
+
+
+def _gateway_serving_endpoints_url(gateway_base_url: str) -> str | None:
+    """Derive the Databricks workspace serving-endpoints URL from a gateway URL.
+
+    The AI Gateway hostname carries an ``ai-gateway`` DNS label that the
+    workspace host does not (e.g. ``12345.ai-gateway.cloud.databricks.com`` →
+    ``12345.cloud.databricks.com``). GPT models route through the workspace's
+    ``/serving-endpoints`` path, not the gateway itself.
+
+    :param gateway_base_url: An AI Gateway base URL, e.g.
+        ``"https://<id>.ai-gateway.cloud.databricks.com/codex/v1"``.
+    :returns: ``https://<workspace>/serving-endpoints``, or ``None`` when the
+        URL doesn't carry the expected ``ai-gateway`` label.
+    """
+    parsed = urlparse(gateway_base_url)
+    if not parsed.hostname:
+        return None
+    labels = parsed.hostname.split(".")
+    if _DATABRICKS_AI_GATEWAY_LABEL not in labels:
+        return None
+    labels.remove(_DATABRICKS_AI_GATEWAY_LABEL)
+    return f"https://{'.'.join(labels)}/serving-endpoints"
+
+
+def _databricks_openai_provider(api_key: str, serving_endpoints_url: str) -> dict[str, Any]:
+    """Build a Pi OpenAI Completions provider config for the Databricks gateway.
+
+    GPT models on the Databricks workspace are served via the OpenAI
+    Completions API at ``/serving-endpoints``. The ``compat`` block disables
+    OpenAI-specific features the Databricks endpoint doesn't support.
+    """
+    return {
+        "baseUrl": serving_endpoints_url,
+        "apiKey": api_key,
+        "api": "openai-completions",
+        "compat": {
+            "supportsDeveloperRole": False,
+            "supportsStore": False,
+            "supportsStrictMode": False,
+            "supportsReasoningEffort": False,
+        },
+        "models": list(_DATABRICKS_RESPONSES_NATIVE_MODELS),
+    }
 
 
 def _gateway_anthropic_base_url(codex_base_url: str) -> str:
@@ -359,6 +452,16 @@ def _cli_config_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiPro
     transport = _cli_config_databricks_transport(entry)
     if transport is None:
         return None
+    api_key = f"!{transport.auth_command}"
+    # Derive the workspace serving-endpoints URL from the AI Gateway URL so Pi
+    # can also list GPT models. Falls back gracefully to Claude-only when the
+    # URL doesn't carry the expected ``ai-gateway`` label.
+    serving_endpoints = _gateway_serving_endpoints_url(transport.base_url)
+    additional: dict[str, Any] = (
+        {_PI_OPENAI_PROVIDER_ID: _databricks_openai_provider(api_key, serving_endpoints)}
+        if serving_endpoints
+        else {}
+    )
     return PiProviderConfig(
         provider_id=_PI_PROVIDER_ID,
         base_url=_gateway_anthropic_base_url(transport.base_url),
@@ -367,9 +470,10 @@ def _cli_config_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiPro
         # Pi resolves a "!command" apiKey at request time, so the gateway
         # bearer token (the codex auth command prints it) is refreshed per
         # request — matching codex-native's refresh semantics.
-        api_key=f"!{transport.auth_command}",
+        api_key=api_key,
         auth_header=True,
         extra_models=list(_DATABRICKS_ANTHROPIC_NATIVE_MODELS),
+        additional_providers=additional,
     )
 
 
