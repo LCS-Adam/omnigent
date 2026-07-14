@@ -140,7 +140,11 @@ class RunnerRouter:
             code=ErrorCode.CONFLICT,
         )
 
-    def client_for_session_resources(self, conversation_id: str) -> RoutedRunner:
+    def client_for_session_resources(
+        self,
+        conversation_id: str,
+        check_circuit: bool = True,
+    ) -> RoutedRunner:
         """
         Return a runner client for session resource access.
 
@@ -151,6 +155,12 @@ class RunnerRouter:
 
         :param conversation_id: Conversation/session id, e.g.
             ``"conv_0123456789abcdef"``.
+        :param check_circuit: When ``True`` (default) the circuit
+            breaker is consulted and raises for open circuits.  Pass
+            ``False`` for control paths (approval forwarding, terminal
+            events) that must reach the runner regardless of resource-
+            proxy failure history and that do not feed the failure
+            counter.
         :returns: Selected runner id and client.
         :raises OmnigentError: If the conversation is missing, the
             pinned runner is offline, or no online runner is available.
@@ -165,7 +175,8 @@ class RunnerRouter:
                     f"runner {conv.runner_id!r} is offline for conversation {conversation_id!r}",
                     code=ErrorCode.RUNNER_UNAVAILABLE,
                 )
-            self._check_circuit(conv.runner_id)
+            if check_circuit:
+                self._check_circuit(conv.runner_id)
             return RoutedRunner(
                 runner_id=conv.runner_id,
                 client=self._client_for_runner(conv.runner_id),

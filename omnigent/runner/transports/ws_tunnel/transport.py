@@ -22,6 +22,7 @@ abort propagates as a ``ConnectionError`` from the body iterator.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 
@@ -156,8 +157,21 @@ class WSTunnelTransport(httpx.AsyncBaseTransport):
                 ),
             )
             # Block until the response head arrives (or the tunnel
-            # aborts the request).
-            head = await state.head_future
+            # aborts the request).  Honour the caller's connect timeout
+            # so a stale-but-connected tunnel doesn't hang indefinitely.
+            connect_timeout: float | None = (request.extensions.get("timeout") or {}).get(
+                "connect"
+            )
+            try:
+                head = await asyncio.wait_for(
+                    asyncio.shield(state.head_future),
+                    timeout=connect_timeout,
+                )
+            except asyncio.TimeoutError as exc:
+                raise httpx.ConnectTimeout(
+                    f"runner {self._runner_id!r} did not respond within {connect_timeout}s",
+                    request=request,
+                ) from exc
         except BaseException:
             # If we failed before getting head, clean up the slot so
             # we don't leak in_flight state.

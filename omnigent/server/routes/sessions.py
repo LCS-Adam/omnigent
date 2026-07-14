@@ -6040,8 +6040,12 @@ async def _get_runner_client(
 
     if runner_router is not None:
         try:
+            # Control paths (approval forwarding, terminal events) should
+            # bypass the circuit check: they don't feed failure counts and
+            # should not be gated by resource-proxy failures.
             routed = runner_router.client_for_session_resources(
                 session_id,
+                check_circuit=False,
             )
             return routed.client
         except (LookupError, httpx.HTTPError, OmnigentError):
@@ -7281,7 +7285,8 @@ async def _reset_runner_resources_after_switch(session_id: str) -> None:
         # env, so it must take the failure path below (suppressing the
         # invalidation publish); HTTPStatusError is an httpx.HTTPError.
         reset_resp.raise_for_status()
-    except (httpx.HTTPError, HTTPException, OmnigentError, RuntimeError):
+        _report_runner_transport_success(routed.runner_id)
+    except (httpx.HTTPError, HTTPException, OmnigentError, RuntimeError) as exc:
         # Best-effort: a runner hiccup must not break the (already-committed)
         # switch. OmnigentError covers the session-not-runner-bound / runner-
         # offline case raised by _get_runner_client_for_resource_access. The
@@ -7289,6 +7294,8 @@ async def _reset_runner_resources_after_switch(session_id: str) -> None:
         # changed-files event on this path either: the runner's env cache is
         # still the OLD agent's, so a triggered refetch would re-serve it —
         # and a lost runner rebuilds from the new spec on relaunch anyway.
+        if isinstance(exc, (httpx.HTTPError, ConnectionError)):
+            _report_runner_transport_failure(routed.runner_id, exc)  # type: ignore[possibly-undefined]
         _logger.warning(
             "post-switch runner-resource reset failed for session=%s", session_id, exc_info=True
         )
@@ -20434,7 +20441,9 @@ def create_sessions_router(
                     f"/v1/sessions/{session_id}/resources",
                     timeout=3.0,
                 )
-            except (httpx.HTTPError, ConnectionError):
+                _report_runner_transport_success(routed.runner_id)
+            except (httpx.HTTPError, ConnectionError) as exc:
+                _report_runner_transport_failure(routed.runner_id, exc)
                 _logger.warning(
                     "Runner cleanup failed for %s, falling back",
                     session_id,
