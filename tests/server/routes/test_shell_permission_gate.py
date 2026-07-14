@@ -181,6 +181,12 @@ class _FakeRunnerRouter:
     def client_for_session_resources(self, session_id: str) -> _RoutedRunner:
         return _RoutedRunner(self.client)
 
+    def record_runner_success(self, runner_id: str) -> None:
+        del runner_id
+
+    def record_runner_failure(self, runner_id: str) -> None:
+        del runner_id
+
 
 @pytest.fixture
 def runner_globals_reset() -> Iterator[None]:

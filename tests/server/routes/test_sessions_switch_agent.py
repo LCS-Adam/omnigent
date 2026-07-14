@@ -663,6 +663,15 @@ class _RunnerClientStub:
         )
 
 
+class _RoutedRunnerStub:
+    """Wraps _RunnerClientStub as a RoutedRunner-shaped object."""
+
+    runner_id = "runner_stub"
+
+    def __init__(self, stub: _RunnerClientStub) -> None:
+        self.client = stub
+
+
 @pytest.mark.asyncio
 async def test_switch_reset_publishes_changed_files_invalidated_after_reset(
     monkeypatch: pytest.MonkeyPatch,
@@ -682,9 +691,9 @@ async def test_switch_reset_publishes_changed_files_invalidated_after_reset(
     _patch_family_helpers(monkeypatch, same_family=True, native=True, labels={})
     runner = _RunnerClientStub()
 
-    async def _get_runner(session_id: str) -> _RunnerClientStub:
+    async def _get_runner(session_id: str) -> _RoutedRunnerStub:
         del session_id
-        return runner
+        return _RoutedRunnerStub(runner)
 
     monkeypatch.setattr(sessions_mod, "_get_runner_client_for_resource_access", _get_runner)
     published: list[dict[str, object]] = []
@@ -756,12 +765,12 @@ async def test_switch_reset_failure_publishes_no_changed_files_event(
     )
     _patch_family_helpers(monkeypatch, same_family=True, native=True, labels={})
 
-    async def _get_runner(session_id: str) -> _RunnerClientStub | None:
+    async def _get_runner(session_id: str) -> _RoutedRunnerStub | None:
         del session_id
         if getter_kind == "post_fails":
-            return _RunnerClientStub(fail=True)
+            return _RoutedRunnerStub(_RunnerClientStub(fail=True))
         if getter_kind == "post_500":
-            return _RunnerClientStub(status_code=500)
+            return _RoutedRunnerStub(_RunnerClientStub(status_code=500))
         return None
 
     monkeypatch.setattr(sessions_mod, "_get_runner_client_for_resource_access", _get_runner)
