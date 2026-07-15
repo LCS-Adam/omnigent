@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict, deque
 from typing import Any
 
 from sqlalchemy import (
@@ -20,7 +21,7 @@ from sqlalchemy import (
     text,
     update,
 )
-from sqlalchemy.orm import QueryableAttribute, Session
+from sqlalchemy.orm import QueryableAttribute, Session, aliased
 from sqlalchemy.sql.selectable import Subquery
 
 from omnigent._wrapper_labels import UI_MODE_LABEL_KEY, WRAPPER_LABEL_KEY
@@ -69,7 +70,15 @@ from omnigent.entities import (
     PagedList,
     parse_item_data,
 )
+from omnigent.session_import.models import (
+    IMPORT_DIGEST_LABEL_KEY,
+    IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY,
+    IMPORT_ITEM_COUNT_LABEL_KEY,
+    IMPORT_SOURCE_LABEL_KEY,
+    conversation_items_digest,
+)
 from omnigent.stores.conversation_store import (
+    _FORK_ONLY_DROPPED_LABEL_KEYS,
     _INSTANCE_SCOPED_LABEL_KEYS,
     FORK_CARRY_HISTORY_LABEL_KEY,
     FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
@@ -79,6 +88,7 @@ from omnigent.stores.conversation_store import (
     ConversationNotFoundError,
     ConversationStore,
     CreatedSession,
+    ImportedPrefixMismatchError,
     SessionConnectivity,
 )
 
@@ -595,6 +605,41 @@ def _to_item(row: SqlConversationItem) -> ConversationItem:
     )
 
 
+def _build_item_row(
+    conversation_id: str,
+    item: NewConversationItem,
+    *,
+    position: int,
+    created_at: int,
+) -> tuple[SqlConversationItem, ConversationItem, str]:
+    """Build one persisted item row, entity, and searchable text."""
+    data = strip_nul_bytes(json.dumps(item.data.model_dump(exclude_none=True)))
+    search = strip_nul_bytes(extract_search_text(item))
+    item_id = generate_item_id(item.type)
+    row = SqlConversationItem(
+        id=item_id,
+        conversation_id=conversation_id,
+        response_id=item.response_id,
+        created_at=created_at,
+        status=encode_item_status("completed"),
+        position=position,
+        type=encode_item_type(item.type),
+        data=data,
+        search_text=search,
+        created_by=item.created_by,
+    )
+    entity = ConversationItem(
+        id=item_id,
+        type=item.type,
+        status="completed",
+        response_id=item.response_id,
+        created_at=created_at,
+        data=item.data,
+        created_by=item.created_by,
+    )
+    return row, entity, search
+
+
 def _ranked_latest_message_items(conversation_ids: list[str]) -> Subquery:
     """
     Build a ranked latest-message subquery for multiple conversations.
@@ -981,6 +1026,39 @@ class SqlAlchemyConversationStore(ConversationStore):
             return _to_conversation(
                 row, meta, _fetch_labels(session, conversation_id), agent_config
             )
+
+    def find_imported_conversation(
+        self,
+        source: str,
+        external_session_id: str,
+    ) -> Conversation | None:
+        """Find the original conversation carrying an import provenance pair."""
+        source_label = aliased(SqlConversationLabel)
+        external_label = aliased(SqlConversationLabel)
+        with self._conv_session() as session:
+            conversation_id = session.execute(
+                select(SqlConversation.id)
+                .join(
+                    source_label,
+                    (source_label.workspace_id == SqlConversation.workspace_id)
+                    & (source_label.conversation_id == SqlConversation.id),
+                )
+                .join(
+                    external_label,
+                    (external_label.workspace_id == SqlConversation.workspace_id)
+                    & (external_label.conversation_id == SqlConversation.id),
+                )
+                .where(
+                    SqlConversation.workspace_id == current_workspace_id(),
+                    source_label.key == IMPORT_SOURCE_LABEL_KEY,
+                    source_label.value == source,
+                    external_label.key == IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY,
+                    external_label.value == external_session_id,
+                )
+                .order_by(SqlConversation.created_at, SqlConversation.id)
+                .limit(1)
+            ).scalar_one_or_none()
+        return self.get_conversation(conversation_id) if conversation_id is not None else None
 
     def get_runner_ids(self, conversation_ids: list[str]) -> dict[str, str | None]:
         """
@@ -1806,48 +1884,134 @@ class SqlAlchemyConversationStore(ConversationStore):
             for item in items:
                 position = next_pos
                 next_pos += 1
-                data_dict = item.data.model_dump(exclude_none=True)
-                # Strip NUL bytes before they reach a Postgres text
-                # column, which rejects them outright. Tool output can
-                # embed NUL (e.g. reading a binary file); without this
-                # the whole INSERT aborts and the item never persists.
-                data = strip_nul_bytes(json.dumps(data_dict))
-                search = strip_nul_bytes(extract_search_text(item))
-                item_id = generate_item_id(item.type)
-                row = SqlConversationItem(
-                    id=item_id,
-                    conversation_id=conversation_id,
-                    response_id=item.response_id,
-                    created_at=now,
-                    status=encode_item_status("completed"),  # items are final on append
+                row, entity, search = _build_item_row(
+                    conversation_id,
+                    item,
                     position=position,
-                    type=encode_item_type(item.type),
-                    data=data,
-                    search_text=search,
-                    created_by=item.created_by,
+                    created_at=now,
                 )
                 session.add(row)
-                insert_fts(session, item_id, conversation_id, search)
-                persisted.append(
-                    ConversationItem(
-                        id=row.id,
-                        # The row stores int codes; the entity carries the
-                        # string names. item.type is the source string and
-                        # the status was just written as "completed".
-                        type=item.type,
-                        status="completed",
-                        response_id=row.response_id,
-                        created_at=row.created_at,
-                        data=item.data,
-                        created_by=item.created_by,
-                    )
-                )
+                insert_fts(session, row.id, conversation_id, search)
+                persisted.append(entity)
 
             # Persist the advanced counter so the next append reads it instead
             # of scanning; this also lazily backfills a pre-counter conversation.
             if conv_row is not None:
                 conv_row.next_position = next_pos
 
+        return persisted
+
+    def replace_imported_prefix(
+        self,
+        conversation_id: str,
+        items: list[NewConversationItem],
+        *,
+        expected_count: int,
+        expected_digest: str,
+    ) -> list[ConversationItem]:
+        """Replace a verified imported prefix while retaining later turns."""
+        now = now_epoch()
+        persisted: list[ConversationItem] = []
+        with self._conv_session() as session:
+            self._lock_conversation(session, conversation_id)
+            conversation = session.get(
+                SqlConversation,
+                (current_workspace_id(), conversation_id),
+            )
+            if conversation is None:
+                raise ConversationNotFoundError(f"conversation {conversation_id!r} does not exist")
+            rows = list(
+                session.execute(
+                    select(SqlConversationItem)
+                    .where(
+                        SqlConversationItem.workspace_id == current_workspace_id(),
+                        SqlConversationItem.conversation_id == conversation_id,
+                    )
+                    .order_by(SqlConversationItem.position)
+                )
+                .scalars()
+                .all()
+            )
+            if expected_count < 0 or len(rows) < expected_count:
+                raise ImportedPrefixMismatchError(
+                    "the previously imported transcript boundary is no longer present"
+                )
+            prefix = rows[:expected_count]
+            if conversation_items_digest([_to_item(row) for row in prefix]) != expected_digest:
+                raise ImportedPrefixMismatchError(
+                    "the previously imported transcript was modified after import"
+                )
+
+            preserved = rows[expected_count:]
+            source_positions: dict[str, deque[int]] = defaultdict(deque)
+            for index, item in enumerate(items[expected_count:]):
+                source_positions[
+                    conversation_items_digest([item], include_created_by=False)
+                ].append(index)
+            source_cursor = 0
+            retained: list[SqlConversationItem] = []
+            represented: list[SqlConversationItem] = []
+            for row in preserved:
+                candidates = source_positions[
+                    conversation_items_digest([_to_item(row)], include_created_by=False)
+                ]
+                while candidates and candidates[0] < source_cursor:
+                    candidates.popleft()
+                if candidates:
+                    source_cursor = candidates.popleft() + 1
+                    represented.append(row)
+                else:
+                    retained.append(row)
+            preserved = retained
+            delete_fts_by_conversation(session, conversation_id)
+            for row in [*prefix, *represented]:
+                session.delete(row)
+            # Move retained rows out of the non-negative position range before
+            # compacting them behind a replacement prefix. This avoids transient
+            # unique-position collisions on databases with immediate constraints.
+            for index, row in enumerate(preserved):
+                row.position = -(index + 1)
+            session.flush()
+            for index, row in enumerate(preserved):
+                row.position = len(items) + index
+            session.flush()
+
+            for position, item in enumerate(items):
+                row, entity, search = _build_item_row(
+                    conversation_id,
+                    item,
+                    position=position,
+                    created_at=now,
+                )
+                session.add(row)
+                insert_fts(session, row.id, conversation_id, search)
+                persisted.append(entity)
+            for row in preserved:
+                insert_fts(session, row.id, conversation_id, row.search_text)
+
+            conversation.next_position = len(items) + len(preserved)
+            conversation.updated_at = now
+            import_labels = {
+                IMPORT_ITEM_COUNT_LABEL_KEY: str(len(items)),
+                IMPORT_DIGEST_LABEL_KEY: conversation_items_digest(items),
+            }
+            for key, value in import_labels.items():
+                label = session.get(
+                    SqlConversationLabel,
+                    (current_workspace_id(), conversation_id, key),
+                )
+                if label is None:
+                    session.add(
+                        SqlConversationLabel(
+                            conversation_id=conversation_id,
+                            key=key,
+                            value=value,
+                            updated_at=now,
+                        )
+                    )
+                else:
+                    label.value = value
+                    label.updated_at = now
         return persisted
 
     def list_projects(
@@ -3157,7 +3321,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             fork_labels = {
                 key: value
                 for key, value in _fetch_labels(session, source_conversation_id).items()
-                if key not in _INSTANCE_SCOPED_LABEL_KEYS
+                if key not in (_INSTANCE_SCOPED_LABEL_KEYS | _FORK_ONLY_DROPPED_LABEL_KEYS)
             }
             source_workspace = source_meta_ref.workspace if source_meta_ref else None
             source_ext_session = source_meta_ref.external_session_id if source_meta_ref else None

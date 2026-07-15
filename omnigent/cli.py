@@ -1330,6 +1330,7 @@ _CLICK_SUBCOMMANDS: frozenset[str] = frozenset(
         "goose",
         "hermes",
         "host",
+        "import",
         "_internal",
         "kimi",
         "kiro",
@@ -5947,6 +5948,118 @@ def resume(
     )
 
 
+@cli.command("import")
+@click.option(
+    "--harness",
+    type=click.Choice(["claude", "codex", "cursor"], case_sensitive=False),
+    required=True,
+    help="Local coding harness that owns the source session.",
+)
+@click.option(
+    "--session",
+    "source_session_id",
+    required=True,
+    metavar="SESSION_ID",
+    help="Harness-native session ID to import.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Replace the previously imported source history on the same Omnigent session.",
+)
+@click.option(
+    "--server",
+    default=None,
+    help=(
+        "Omnigent server URL. Defaults to the configured server, an existing "
+        "local server, or a newly started local server."
+    ),
+)
+def import_session_command(
+    harness: str,
+    source_session_id: str,
+    force: bool,
+    server: str | None,
+) -> None:
+    """Import one local Claude Code, Codex, or Cursor chat.
+
+    The source transcript is converted to ordinary Omnigent items and stored
+    as a normal session. Re-running the command is idempotent; use ``--force``
+    to refresh the imported history while preserving later Omnigent turns.
+
+    \b
+    Examples:
+      omnigent import --harness claude --session <session-id>
+      omnigent import --harness codex --session <session-id> --force
+      omnigent import --harness cursor --session <session-id>
+    """
+    import httpx
+
+    from omnigent.chat import _remote_headers
+    from omnigent.session_import import (
+        ImportSource,
+        SessionImportNotFoundError,
+    )
+    from omnigent.session_import.local import load_local_session
+
+    try:
+        imported = load_local_session(cast(ImportSource, harness.lower()), source_session_id)
+    except SessionImportNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    cfg = _load_effective_config()
+    base_url = _resolve_attach_server(server, cfg.get("server"))
+    if base_url is None:
+        base_url = ensure_local_omnigent_server().url
+    base_url = base_url.rstrip("/")
+    payload = {
+        "source": imported.source,
+        "external_session_id": imported.external_session_id,
+        "workspace": imported.workspace,
+        "force": force,
+        "items": [
+            {
+                "type": item.type,
+                "response_id": item.response_id,
+                "data": item.data.model_dump(mode="json", exclude_none=True),
+            }
+            for item in imported.items
+        ],
+    }
+    try:
+        response = httpx.post(
+            f"{base_url}/v1/imports",
+            json=payload,
+            headers=_remote_headers(server_url=base_url),
+            timeout=120.0,
+        )
+    except httpx.RequestError as exc:
+        raise click.ClickException(f"Could not reach the Omnigent server: {exc}") from exc
+    if response.is_error:
+        try:
+            body = response.json()
+            detail = body.get("error", {}).get("message") or body.get("detail")
+        except (ValueError, AttributeError):
+            detail = None
+        raise click.ClickException(
+            f"Import failed ({response.status_code}): {detail or response.text}"
+        )
+
+    result = response.json()
+    session_id = result["session_id"]
+    item_count = result["item_count"]
+    status = result["status"]
+    if status == "already_imported":
+        click.echo(
+            f"Session {source_session_id} is already imported as {session_id} "
+            f"({item_count} item(s))."
+        )
+    elif status == "replaced":
+        click.echo(f"Replaced imported history in {session_id} with {item_count} item(s).")
+    else:
+        click.echo(f"Imported {item_count} item(s) into {session_id}.")
+
+
 @cli.group("session", invoke_without_command=True)
 @click.pass_context
 def session(ctx: click.Context) -> None:
@@ -5993,7 +6106,7 @@ def session_export(session_id: str, output: str | None, server: str | None) -> N
     the session metadata (``"record_type": "session_meta"``); every
     subsequent line is one conversation item
     (``"record_type": "item"``).  The file preserves full turn order
-    and can be re-imported with a future ``omnigent session import``.
+    and is independent of ``omnigent import``, which reads native harness history.
 
     \b
     Examples:

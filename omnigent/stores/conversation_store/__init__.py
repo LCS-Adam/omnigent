@@ -11,6 +11,7 @@ from omnigent.entities import (
     NewConversationItem,
     PagedList,
 )
+from omnigent.session_import import IMPORT_PROVENANCE_LABEL_KEYS
 
 # Label set on a fork of a session that had a working directory. Its
 # value is the source session id. Presence marks the (unbound) clone as
@@ -112,6 +113,10 @@ _INSTANCE_SCOPED_LABEL_KEYS = frozenset(
     }
 )
 
+# Source identity belongs only to the original imported session. Unlike runtime
+# instance labels, these survive an in-place agent switch but never a fork.
+_FORK_ONLY_DROPPED_LABEL_KEYS = IMPORT_PROVENANCE_LABEL_KEYS
+
 
 @dataclass(frozen=True)
 class CreatedSession:
@@ -162,6 +167,10 @@ class ConversationNotFoundError(Exception):
     Store methods use this when absence is not a benign
     no-op and the route layer must return a typed 404.
     """
+
+
+class ImportedPrefixMismatchError(Exception):
+    """Raised when forced import can no longer identify its original prefix."""
 
 
 class NameAlreadyExistsError(Exception):
@@ -310,6 +319,20 @@ class ConversationStore(ABC):
             e.g. ``"conv_abc123"``.
         :returns: The :class:`Conversation` if found, otherwise
             ``None``.
+        """
+        ...
+
+    @abstractmethod
+    def find_imported_conversation(
+        self,
+        source: str,
+        external_session_id: str,
+    ) -> Conversation | None:
+        """Find the original session imported from one external transcript.
+
+        :param source: Import source key, e.g. ``"claude"``.
+        :param external_session_id: Source harness session id.
+        :returns: The matching conversation, or ``None``.
         """
         ...
 
@@ -468,6 +491,27 @@ class ConversationStore(ABC):
             to persist.
         :returns: The persisted :class:`ConversationItem` list
             with store-assigned IDs and timestamps.
+        """
+        ...
+
+    @abstractmethod
+    def replace_imported_prefix(
+        self,
+        conversation_id: str,
+        items: list[NewConversationItem],
+        *,
+        expected_count: int,
+        expected_digest: str,
+    ) -> list[ConversationItem]:
+        """Replace a verified imported item prefix and preserve later items.
+
+        :param conversation_id: Existing imported conversation id.
+        :param items: Replacement normalized source items.
+        :param expected_count: Number of items in the prior imported prefix.
+        :param expected_digest: Digest recorded for that prior prefix.
+        :returns: Newly persisted replacement items.
+        :raises ImportedPrefixMismatchError: If the stored prefix no longer
+            matches the recorded import boundary.
         """
         ...
 
