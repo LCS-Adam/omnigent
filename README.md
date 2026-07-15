@@ -68,12 +68,38 @@ curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/i
 ```
 
 <details>
+<summary>Optional integrations and extras</summary>
+
+Need an optional integration? Pass one or more extras to the installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh -s -- --extra databricks
+curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh -s -- --extra modal,e2b
+```
+
+Available user-facing extras include:
+
+- **Model providers:** `databricks`, `bedrock`, `vertex`
+- **Sandbox providers:** `modal`, `daytona`, `boxlite`, `cwsandbox`, `e2b`,
+  `openshell`, `kubernetes`
+- **SDK harnesses:** `antigravity`, `copilot`, `cursor`, `agents-sdk`
+- **Storage and memory:** `s3`, `hindsight`
+
+</details>
+
+<details>
 <summary>Prefer to install manually?</summary>
 
 Omnigent needs **Python 3.12+**. Install the `omnigent` package:
 
 ```bash
 uv tool install omnigent        # or: pip install "omnigent"
+```
+
+Manual installs use the same extras syntax, for example:
+
+```bash
+uv tool install "omnigent[databricks,modal]"
 ```
 
 Or with [Homebrew](https://github.com/omnigent-ai/homebrew-tap):
