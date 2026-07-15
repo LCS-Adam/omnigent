@@ -89,6 +89,19 @@ def _find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _omni_executable() -> str:
+    """The ``omni`` console script beside the (compat-aware) interpreter.
+
+    ``server_executable()`` returns the interpreter the server/runner subprocess
+    should run under — ``sys.executable`` normally, or a pinned older build's
+    python in cross-version compat mode. The ``omni`` console script is
+    installed next to that interpreter (``[project.scripts]`` in pyproject), so
+    deriving it from the same directory launches the real user-facing command
+    (``omni server`` / ``omni host``) while still honoring the compat pin.
+    """
+    return str(Path(server_executable()).with_name("omni"))
+
+
 class BenchEnvironment:
     """Async context manager owning the benchmark's server (± runner + mock).
 
@@ -261,9 +274,7 @@ class BenchEnvironment:
         # four slashes; the temp path is absolute.
         db_uri = self.database_uri or f"sqlite:///{self._tmp / 'bench.db'}"
         args = [
-            server_executable(),
-            "-m",
-            "omnigent.cli",
+            _omni_executable(),
             "server",
             "--port",
             str(port),
@@ -355,15 +366,17 @@ class BenchEnvironment:
         )
 
     def _spawn_host(self, base_env: dict[str, str]) -> subprocess.Popen[bytes]:
-        """Spawn a real ``omnigent host`` daemon against the bench server.
+        """Spawn a real ``omni host`` daemon against the bench server.
 
-        Invokes ``run_host_process`` directly (not the ``_daemon_entry`` CLI)
-        so the identity comes from :data:`HOST_ID_ENV_VAR` /
-        :data:`HOST_NAME_ENV_VAR` — with both set, ``load_or_create_host_identity``
+        Runs the user-facing ``omni host --server`` command — the same daemon a
+        developer starts by hand. Identity comes from :data:`HOST_ID_ENV_VAR` /
+        :data:`HOST_NAME_ENV_VAR`: with both set, ``load_or_create_host_identity``
         returns that identity WITHOUT reading or writing any ``config.yaml``, so
         the daemon never touches the developer's real ``~/.omnigent`` (nor
-        collides with a sibling bench leg). The daemon self-registers over
-        loopback (single-user ``RESERVED_USER_LOCAL`` owner, no token needed) and
+        collides with a sibling bench leg). ``--non-interactive`` keeps it from
+        ever launching a browser login (moot for the loopback server, which is
+        not Databricks-fronted, but explicit for CI). The daemon self-registers
+        over loopback (single-user ``RESERVED_USER_LOCAL`` owner, no token) and
         launches runners on demand when the server sends ``host.launch_runner``.
         """
         self.host_id = f"host_bench_{uuid.uuid4().hex[:12]}"
@@ -375,12 +388,8 @@ class BenchEnvironment:
             HOST_ID_ENV_VAR: self.host_id,
             HOST_NAME_ENV_VAR: f"bench-host-{self.host_id[-8:]}",
         }
-        code = (
-            "from omnigent.host.connect import run_host_process;"
-            f"run_host_process({self.base_url!r})"
-        )
         return subprocess.Popen(
-            [server_executable(), "-c", code],
+            [_omni_executable(), "host", "--server", self.base_url, "--non-interactive"],
             env=host_env,
             cwd=str(workspace),
             stdout=self._log("host-daemon.log"),
@@ -441,6 +450,8 @@ class BenchEnvironment:
                         if host.get("host_id") == self.host_id and host.get("status") == "online":
                             return
             except httpx.HTTPError:
+                # Server not yet accepting requests, or a transient read error:
+                # keep polling until the deadline rather than failing the boot.
                 pass
             time.sleep(_POLL_INTERVAL_S)
         raise RuntimeError(f"host {self.host_id} not online within {_HOST_ONLINE_TIMEOUT_S}s")
@@ -720,15 +731,19 @@ class BenchEnvironment:
         subscribe to ``GET …/stream``, wait for the stream's ready heartbeat (the
         first SSE line — the server yields it right after registering the
         live-tail slot, so no event can be missed), POST the message, and return
-        on the first ``response.output_text.delta``. A terminal event before any
-        delta means the turn produced no streamed text (a failure).
+        on the first response from the model — either a
+        ``response.output_text.delta`` (streamed text) or a
+        ``response.output_item.done`` (a completed output item, e.g. a tool call
+        for harnesses that don't stream text deltas). This measures time to *any*
+        first response, not just text. A terminal event before either arrives
+        means the turn produced no response at all (a failure).
 
         :param wait_idle_first: When ``True``, wait for the session to be ``idle``
             before subscribing so a prior turn's terminal event can't race this
-            turn's delta (warm-session TTFT). ``False`` for a fresh session whose
+            turn's response (warm-session TTFT). ``False`` for a fresh session whose
             first turn is the only one — the cold path, where the timed span must
             include runner launch + connect, so we must NOT poll it warm first.
-        :raises RuntimeError: If not in runner mode, or no delta / a terminal
+        :raises RuntimeError: If not in runner mode, or no response / a terminal
             event arrives within *timeout*.
         """
         assert self.client is not None
@@ -737,6 +752,7 @@ class BenchEnvironment:
 
         connected = asyncio.Event()
         first_delta = asyncio.Event()
+        first_response = asyncio.Event()
         outcome: dict[str, str] = {}
 
         async def _read_stream() -> None:
@@ -756,6 +772,9 @@ class BenchEnvironment:
                         if etype == "response.output_text.delta":
                             first_delta.set()
                             return
+                        if etype == "response.output_item.done":
+                            first_response.set()
+                            return
                         if etype in _STREAM_TERMINAL_EVENTS:
                             outcome["terminal"] = etype
                             first_delta.set()
@@ -774,7 +793,7 @@ class BenchEnvironment:
         reader = asyncio.create_task(_read_stream())
         try:
             # Wait until the stream is actually connected (not a fixed sleep) so
-            # the measured window is post → first delta, not subscription setup.
+            # the measured window is post → first response, not subscription setup.
             await asyncio.wait_for(connected.wait(), timeout=timeout)
             posted = await self.client.post(
                 f"/v1/sessions/{session_id}/events",
@@ -784,17 +803,29 @@ class BenchEnvironment:
                 },
             )
             posted.raise_for_status()
-            try:
-                await asyncio.wait_for(first_delta.wait(), timeout=timeout)
-            except TimeoutError as exc:
+            # Return on the first response, whichever comes first: a streamed text
+            # delta or a completed output item (e.g. a tool call for harnesses that
+            # don't stream text).
+            waiters = [
+                asyncio.create_task(first_delta.wait()),
+                asyncio.create_task(first_response.wait()),
+            ]
+            done, pending = await asyncio.wait(
+                waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            if not done:
                 raise RuntimeError(
-                    f"no output_text.delta within {timeout}s (session {session_id})"
-                ) from exc
+                    "no output_text.delta or output_item.done within "
+                    f"{timeout}s (session {session_id})"
+                )
             if "error" in outcome:
                 raise RuntimeError(f"stream error: {outcome['error']}")
             if "terminal" in outcome:
                 raise RuntimeError(
-                    f"turn reached {outcome['terminal']} before any delta (session {session_id})"
+                    f"turn reached {outcome['terminal']} before any response "
+                    f"(session {session_id})"
                 )
         finally:
             reader.cancel()

@@ -426,14 +426,22 @@ async def _measure_session_cold_start(env: BenchEnvironment, ctx: JourneyContext
     ``BenchEnvironment.cold_start_first_delta``): create a host-bound session
     (which fires ``host.launch_runner`` at the host daemon and returns before
     the runner connects), attach the SSE stream, wait for its ready heartbeat,
-    POST the first message, and return on the first ``response.output_text.delta``.
+    POST the first message, and return on the first response.
 
     Because the message posts while the runner is still booting, the server's
     connect-grace wait is on the timed path — so the measured span captures the
     true new-conversation cost: host launch + runner boot + reverse-tunnel
-    connect + first-token pipeline. Each iteration is its own fresh session; the
-    host daemon reaps the runner it launched when the session goes idle, so no
-    per-iteration runner teardown is needed here.
+    connect + first-token pipeline.
+
+    Each iteration is its own fresh session with its own host-launched runner.
+    The server never stops an external-host runner on idle (only on an explicit
+    stop/delete, neither of which the UI first-message path does), so each
+    iteration's runner stays connected until the daemon is SIGTERM'd at env
+    teardown, which reaps them together. That is bounded — ``_RUNNER_MAX_ITERATIONS``
+    (+ warmups) runners at most, all cleaned up at the end — so we deliberately
+    skip per-iteration teardown: stopping the runner would add a
+    stop-round-trip to a journey whose whole point is to time the fresh-launch
+    cost, and would not reflect what a real first message does.
     """
     agent_id = cast(str, ctx)  # _setup_turn_agent (stream=True)
     await env.cold_start_first_delta(agent_id, _TURN_PROMPT)
