@@ -29,4 +29,18 @@ describe("ThemeColorPicker", () => {
     fireEvent.change(screen.getByTestId("theme-accent-hue"), { target: { value: "120" } });
     expect(onChange).toHaveBeenLastCalledWith("#00ff00");
   });
+
+  it("randomizes to a vivid color", () => {
+    const onChange = vi.fn();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    render(
+      <ThemeColorPicker label="Accent" value="#ff0000" testId="theme-accent" onChange={onChange} />,
+    );
+
+    fireEvent.click(screen.getByTestId("theme-accent-trigger"));
+    fireEvent.click(screen.getByRole("button", { name: "Randomize accent" }));
+
+    expect(onChange).toHaveBeenLastCalledWith("#3ad2d2");
+    random.mockRestore();
+  });
 });
