@@ -5992,8 +5992,11 @@ def _spawn_async_tool(
         ``GET …/changes`` endpoint.
     :param resource_registry: Optional session-resource registry used by
         async terminal-tool launches.
-    :returns: JSON handle string with ``handle_id``, ``tool_name``,
-        ``status``.
+    :returns: JSON handle string with canonical ``handle_id``,
+        plus temporary compatibility ``task_id`` (identical value),
+        ``tool_name``, ``status``, and ``message``. Prefer
+        ``handle_id``; ``task_id`` exists only so older clients
+        that still parse the pre-handle_id field keep working.
     """
     target_tool = args.get("tool")
     target_args = args.get("args", "{}")
@@ -6101,12 +6104,16 @@ def _spawn_async_tool(
     return json.dumps(
         {
             "handle_id": handle_id,
+            # Temporary compatibility alias: identical to handle_id
+            # so clients that still read task_id keep working.
+            "task_id": handle_id,
             "tool_name": target_tool,
             "status": "in_progress",
             "message": (
                 f"[System: {target_tool} dispatched as background "
                 f"task {handle_id}. Result will appear in your "
-                f"inbox — call sys_read_inbox to check.]"
+                f"inbox — call sys_read_inbox to check. To abort, "
+                f"call sys_cancel_async with handle_id={handle_id!r}.]"
             ),
         }
     )

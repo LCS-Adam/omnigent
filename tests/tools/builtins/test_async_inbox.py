@@ -229,15 +229,118 @@ def test_cancel_async_schema_uses_handle_id(
 
     The parameter rename from ``task_id`` (parent) to ``handle_id``
     is the one place the schema differs — pin it. A regression
-    that reverted to ``task_id`` would still work (since invoke
-    delegates with task_id JSON), but the LLM's mental model
-    breaks: ``sys_call_async`` returns a "handle", and the cancel
-    parameter should match that vocabulary.
+    that reverted to ``task_id`` would still work (cancel accepts
+    ``task_id`` as a legacy alias), but the LLM's mental model
+    breaks: ``sys_call_async`` returns ``handle_id``, and the
+    cancel parameter must match that vocabulary.
     """
     schema = cancel_tool.get_schema()["function"]["parameters"]
     assert schema["required"] == ["handle_id"]
     assert schema["additionalProperties"] is False
     assert set(schema["properties"].keys()) == {"handle_id"}
+    handle_desc = schema["properties"]["handle_id"]["description"]
+    assert "handle_id" in handle_desc
+    assert "task_id field" not in handle_desc
+
+
+def test_cancel_async_description_names_handle_id(
+    cancel_tool: SysCancelAsyncTool,
+) -> None:
+    """
+    LLM-facing description tells the model to pass ``handle_id``,
+    not the older ``task_id`` field name from the handle JSON.
+    """
+    desc = cancel_tool.description()
+    assert "handle_id" in desc
+    assert "task_id field" not in desc
+    # Keep sys_cancel_task's task_id contract visibly distinct.
+    assert "sys_cancel_task" in desc
+    assert "task_id" in desc
+
+
+def test_call_async_description_names_handle_id(tool: SysCallAsyncTool) -> None:
+    """
+    ``sys_call_async`` description names ``handle_id`` as the
+    canonical identifier for cancel round-trips.
+    """
+    desc = tool.description()
+    assert "handle_id" in desc
+    assert "sys_cancel_async" in desc
+
+
+def test_sys_cancel_task_schema_keeps_task_id_contract() -> None:
+    """
+    Generic ``sys_cancel_task`` stays on ``task_id`` — distinct
+    from ``sys_cancel_async``'s ``handle_id`` contract.
+    """
+    schema = SysCancelTaskTool().get_schema()["function"]["parameters"]
+    assert schema["required"] == ["task_id"]
+    assert set(schema["properties"].keys()) == {"task_id"}
+
+
+@pytest.mark.asyncio
+async def test_spawn_handle_round_trips_to_sys_cancel_async(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Dispatch handle output can be passed directly to
+    ``sys_cancel_async``.
+
+    Pins the identifier contract: ``_spawn_async_tool`` returns
+    canonical ``handle_id`` (plus temporary ``task_id`` alias),
+    and ``_cancel_async_tool`` accepts that same ``handle_id``
+    without remapping.
+    """
+    import asyncio
+
+    from omnigent.runner import tool_dispatch
+
+    async def _slow(**_kw: Any) -> str:
+        await asyncio.sleep(30)
+        return "late"
+
+    monkeypatch.setattr(tool_dispatch, "execute_tool", _slow)
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    tasks: dict[str, tuple[asyncio.Task[str], asyncio.Event]] = {}
+    spawn_kw: dict[str, Any] = {
+        "server_client": None,
+        "terminal_registry": None,
+        "resource_registry": None,
+        "agent_spec": None,
+        "conversation_id": "conv_roundtrip",
+        "task_id": None,
+        "agent_id": None,
+        "agent_name": None,
+        "runner_workspace": None,
+        "mcp_manager": None,
+        "filesystem_registry": None,
+    }
+    handle_raw = tool_dispatch._spawn_async_tool(
+        {"tool": "slow", "args": "{}"},
+        session_inbox=inbox,
+        session_async_tasks=tasks,
+        **spawn_kw,
+    )
+    handle = json.loads(handle_raw)
+    assert "handle_id" in handle
+    assert handle["task_id"] == handle["handle_id"]
+    assert handle["status"] == "in_progress"
+    assert "sys_cancel_async" in handle["message"]
+    assert f"handle_id={handle['handle_id']!r}" in handle["message"]
+
+    bg_task, _evt = tasks[handle["handle_id"]]
+
+    # Round-trip: pass handle_id from the dispatch output straight
+    # into sys_cancel_async's argument shape.
+    cancel_raw = tool_dispatch._cancel_async_tool(
+        {"handle_id": handle["handle_id"]},
+        session_async_tasks=tasks,
+    )
+    cancel = json.loads(cancel_raw)
+    assert cancel == {"cancelled": True, "handle_id": handle["handle_id"]}
+
+    await bg_task
+    assert inbox.get_nowait()["status"] == "cancelled"
 
 
 # ── Manager registration gating ───────────────────────────
