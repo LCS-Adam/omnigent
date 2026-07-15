@@ -1508,7 +1508,6 @@ function AgentHarnessPicker({
           data-testid={`new-chat-landing-agent-${agent.id}`}
           data-active={active ? "true" : undefined}
           onSelect={() => onSelectAgent(agent)}
-          onMouseEnter={() => void prefetchAvailableAgentDetails(agent, queryClient)}
           className="items-start gap-2 rounded-sm px-2 py-1.5 text-13 data-[active=true]:bg-accent/60 data-[active=true]:text-foreground"
         >
           {renderRowInner(agent, true)}
@@ -1536,7 +1535,6 @@ function AgentHarnessPicker({
             onSelectAgent(agent);
             setMobileKnobsAgentId(agent.id);
           }}
-          onMouseEnter={() => void prefetchAvailableAgentDetails(agent, queryClient)}
           className="items-start gap-2 rounded-sm px-2 py-1.5 text-13 data-[active=true]:bg-accent/60 data-[active=true]:text-foreground"
         >
           {renderRowInner(agent, false)}
@@ -1560,7 +1558,6 @@ function AgentHarnessPicker({
             onSelectAgent(agent);
             setOpen(false);
           }}
-          onMouseEnter={() => void prefetchAvailableAgentDetails(agent, queryClient)}
           className="items-start gap-2 rounded-sm px-2 py-1.5 text-13 data-[active=true]:bg-accent/60 data-[active=true]:text-foreground"
         >
           {renderRowInner(agent, false)}
@@ -1583,6 +1580,11 @@ function AgentHarnessPicker({
           // tall list, so the later drill-in (shorter page) can't flip it.
           const rect = triggerRef.current?.getBoundingClientRect();
           if (rect) setMobileSide(window.innerHeight - rect.bottom >= rect.top ? "bottom" : "top");
+          // Prefetch harness/description/skills for all session-discovered
+          // agents so hasKnobs is stable before the user reads the list.
+          for (const agent of [...harnessEntries, ...agentEntries]) {
+            void prefetchAvailableAgentDetails(agent, queryClient);
+          }
         } else {
           // Closing resets the in-place page so the menu always reopens on the
           // agent list, never a stale knobs page.
