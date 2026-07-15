@@ -7,8 +7,11 @@ import { useAvailableAgents } from "./useAvailableAgents";
 
 // The hook unions the built-in agent list from GET /v1/agents with
 // custom agents discovered on the caller's sessions via
-// GET /v1/sessions?limit=100&kind=any (enriched per-agent through
-// GET /v1/sessions/{id}/agent). `authenticatedFetch` passes through to
+// GET /v1/sessions?limit=100&kind=any. Session rows list name-only from
+// the scan; harness/description/skills fill in lazily on hover through
+// GET /v1/sessions/{id}/agent (prefetchAvailableAgentDetails), so the
+// initial render fires no per-session enrich fetch. `authenticatedFetch`
+// passes through to
 // the global `fetch` when no user id is set (the default in jsdom), so
 // stubbing `fetch` exercises the real fetch + mapping path rather than
 // a hand-rolled stand-in. The two top-level fetches run in parallel
@@ -387,7 +390,10 @@ describe("useAvailableAgents", () => {
     // ag_clone/ag_clone2 leaking) means shadow-dropping regressed —
     // ag_clone2 specifically guards the nested fork-of-fork case that
     // surfaces as a duplicate built-in; ag_doc missing means kind=any
-    // discovery broke; two ag_doc rows mean the by-id dedup broke.
+    // discovery broke; two ag_doc rows mean the by-id dedup broke. The
+    // custom row lists name-only from the scan (harness/description/skills
+    // fill in lazily on hover via prefetchAvailableAgentDetails), and
+    // carries the newest session id (conv_3, not the older conv_4).
     expect(result.current.data).toEqual([
       {
         id: "ag_native",
@@ -401,18 +407,18 @@ describe("useAvailableAgents", () => {
         id: "ag_doc",
         name: "doc-writer",
         display_name: "Doc-writer",
-        description: "Documentation specialist",
-        harness: "claude-sdk",
-        skills: [{ name: "humanizer", description: "Remove AI writing patterns" }],
+        description: null,
+        harness: null,
+        skills: [],
+        sessionId: "conv_3",
       },
     ]);
-    // The enrich fetch ran once, against the newest session the agent
-    // was seen on — not the older duplicate (conv_4) and not the
-    // shadowed rows (which must not be enriched at all).
+    // The initial render fires no per-session enrich fetch — the picker
+    // shows immediately from the scan, and enrichment is deferred to hover.
     const enrichCalls = fetchMock.mock.calls
       .map((c) => c[0] as string)
       .filter((u) => u.endsWith("/agent"));
-    expect(enrichCalls).toEqual(["/v1/sessions/conv_3/agent"]);
+    expect(enrichCalls).toEqual([]);
   });
 
   it("dedupes native built-ins and hides session-discovered native shadows", async () => {
@@ -510,49 +516,42 @@ describe("useAvailableAgents", () => {
         ],
         has_more: false,
       }),
-      // Only the newest session per name may be enriched. An enrich
-      // fetch for conv_mid/conv_old is unrouted and rejects loudly,
-      // failing the test if the by-name collapse regresses.
-      "/v1/sessions/conv_new/agent": mockResponse({
-        id: "ag_run3",
-        object: "agent",
-        name: "elise_working_agent",
-        description: "Elise's agent",
-        harness: "claude-sdk",
-      }),
-      "/v1/sessions/conv_doc/agent": mockResponse({
-        id: "ag_doc",
-        object: "agent",
-        name: "doc-writer",
-        description: null,
-        harness: "codex",
-      }),
     });
 
     const { result } = renderHook(() => useAvailableAgents(), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    // Exactly one elise row (the newest mint, ag_run3) plus doc-writer.
+    // Exactly one elise row (the newest mint, ag_run3) plus doc-writer,
+    // each name-only from the scan and carrying its winning session id.
     // Three elise rows would mean the by-name collapse regressed to
-    // by-id-only dedup; zero would mean customs were over-collapsed.
+    // by-id-only dedup; zero would mean customs were over-collapsed. The
+    // by-name winner is the newest session (conv_new), so its id is what
+    // hover enrichment will fetch.
     expect(result.current.data).toEqual([
       {
         id: "ag_run3",
         name: "elise_working_agent",
         display_name: "Elise_working_agent",
-        description: "Elise's agent",
-        harness: "claude-sdk",
+        description: null,
+        harness: null,
         skills: [],
+        sessionId: "conv_new",
       },
       {
         id: "ag_doc",
         name: "doc-writer",
         display_name: "Doc-writer",
         description: null,
-        harness: "codex",
+        harness: null,
         skills: [],
+        sessionId: "conv_doc",
       },
     ]);
+    // No per-session enrich fetch fires on initial render.
+    const enrichCalls = fetchMock.mock.calls
+      .map((c) => c[0] as string)
+      .filter((u) => u.endsWith("/agent"));
+    expect(enrichCalls).toEqual([]);
   });
 
   it("lets a newer upload supersede a same-named user-registered template (builtin: false)", async () => {
@@ -589,13 +588,6 @@ describe("useAvailableAgents", () => {
         ],
         has_more: false,
       }),
-      "/v1/sessions/conv_b/agent": mockResponse({
-        id: "ag_upload_v2",
-        object: "agent",
-        name: "agent-a",
-        description: "version 2",
-        harness: "claude-sdk",
-      }),
     });
 
     const { result } = renderHook(() => useAvailableAgents(), { wrapper });
@@ -607,11 +599,15 @@ describe("useAvailableAgents", () => {
     // mean the template and upload both leaked.
     const ids = result.current.data?.map((a) => a.id);
     expect(ids).toEqual(["ag_debby", "ag_upload_v2"]);
-    // The enrich ran against the upload's session, not the template-bound one.
+    // The upload wins by name and carries its own session id, so hover
+    // enrichment targets conv_b — not the template-bound conv_a.
+    const uploadRow = result.current.data?.find((a) => a.id === "ag_upload_v2");
+    expect(uploadRow?.sessionId).toBe("conv_b");
+    // No per-session enrich fetch fires on initial render.
     const enrichCalls = fetchMock.mock.calls
       .map((c) => c[0] as string)
       .filter((u) => u.endsWith("/agent"));
-    expect(enrichCalls).toEqual(["/v1/sessions/conv_b/agent"]);
+    expect(enrichCalls).toEqual([]);
   });
 
   it("keeps a user-registered template when no newer upload exists", async () => {
@@ -704,7 +700,7 @@ describe("useAvailableAgents", () => {
     expect(result.current.data?.map((a) => a.id)).toEqual(["ag_native"]);
   });
 
-  it("lists a custom agent with scan fields when its enrich fetch fails", async () => {
+  it("lists a custom agent name-only from the scan without an enrich fetch", async () => {
     routeFetch({
       [BUILTINS_URL]: mockResponse({ object: "list", data: [], has_more: false }),
       [SCAN_URL]: mockResponse({
@@ -712,10 +708,9 @@ describe("useAvailableAgents", () => {
         data: [{ id: "conv_3", agent_id: "ag_doc", agent_name: "doc-writer" }],
         has_more: false,
       }),
-      // The agent's bundle can't be loaded (or the fetch 500s) — the
-      // agent must still be listed from scan fields, mirroring the
-      // server's own spec-load degradation, just without harness/skills.
-      "/v1/sessions/conv_3/agent": mockResponse({ detail: "boom" }, { ok: false, status: 500 }),
+      // No enrich route: the picker renders from scan fields alone
+      // (harness/description/skills fill in lazily on hover). An enrich
+      // fetch here would be unrouted and reject loudly.
     });
 
     const { result } = renderHook(() => useAvailableAgents(), { wrapper });
@@ -729,7 +724,12 @@ describe("useAvailableAgents", () => {
         description: null,
         harness: null,
         skills: [],
+        sessionId: "conv_3",
       },
     ]);
+    const enrichCalls = fetchMock.mock.calls
+      .map((c) => c[0] as string)
+      .filter((u) => u.endsWith("/agent"));
+    expect(enrichCalls).toEqual([]);
   });
 });

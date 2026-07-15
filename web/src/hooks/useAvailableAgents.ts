@@ -301,6 +301,17 @@ async function fetchAvailableAgents(): Promise<AvailableAgent[]> {
   const seededNames = new Set(seeded.map((a) => agentRootName(a.name)));
   const hasKiroBuiltin = seeded.some((a) => nativeCodingAgentForAvailableAgent(a)?.key === "kiro");
   const kiroLegacyNames = new Set(["kiro"]);
+  // Names of every catalog row that resolves to a native coding agent —
+  // including stale/misspelled rows (e.g. `kiro-naitive`) the catalog still
+  // carries with their harness. Session scan rows lack harness (it's only
+  // fetched lazily on hover), so a same-named native shadow would otherwise
+  // leak into the picker as a duplicate native card before enrichment. Match
+  // by name here, while the harness is still known from the catalog.
+  const nativeCatalogNames = new Set(
+    catalog
+      .filter((a) => nativeCodingAgentForAvailableAgent(a) !== undefined)
+      .map((a) => agentRootName(a.name)),
+  );
 
   const recencyOf = (a: AvailableAgent): number => a.created_at ?? 0;
 
@@ -334,6 +345,10 @@ async function fetchAvailableAgents(): Promise<AvailableAgent[]> {
     // Seeded built-in name (incl. fork/switch clones): the built-in wins.
     if (seededNames.has(base)) continue;
     if (hasKiroBuiltin && kiroLegacyNames.has(base.toLocaleLowerCase())) continue;
+    // Same-named as a native catalog row (e.g. a legacy `kiro-naitive`): the
+    // native built-in is canonical, so drop the session shadow by name — its
+    // harness isn't loaded yet to catch it downstream.
+    if (nativeCatalogNames.has(base)) continue;
     // Genuine custom upload (or a clone of one). Newest same-named row wins,
     // superseding an older user-registered template seeded above. Strict `>`
     // so equal recency keeps the FIRST seen — the scan is newest-first, so
