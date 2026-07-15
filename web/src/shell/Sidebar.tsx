@@ -79,6 +79,7 @@ import {
   ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -536,7 +537,10 @@ export function Sidebar({ open, onClose, dragProgress = null, onOpenSearch }: Si
             <Button
               asChild
               className={cn(
-                "w-full justify-start gap-2 text-sm",
+                // px-2 + gap-1 puts the icon on the sidebar's left (red) column
+                // and the label on the label (blue) column — matching section
+                // headers and project folders.
+                "w-full justify-start gap-1 px-2 text-sm",
                 isNewChatPage && "bg-muted font-semibold",
               )}
               variant="ghost"
@@ -577,9 +581,9 @@ export function Sidebar({ open, onClose, dragProgress = null, onOpenSearch }: Si
                   onClick={() => onOpenSearch?.()}
                   aria-label="Search"
                   data-testid="sidebar-search-button"
-                  className="group relative flex min-h-8 flex-1 items-center rounded-full border border-input pr-2 pl-8 text-left text-sm text-muted-foreground transition hover:bg-muted focus-visible:outline-1"
+                  className="group relative flex min-h-8 flex-1 items-center rounded-full border border-input pr-2 pl-7 text-left text-sm text-muted-foreground transition hover:bg-muted focus-visible:outline-1"
                 >
-                  <SearchIcon className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-2.5 size-3.5" />
+                  <SearchIcon className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-2 size-3.5" />
                   <span className="flex-1 truncate">Search</span>
                   {/* ⌘K hint — hidden until the button is hovered / focused,
                       mirroring the sidebar's other hover-revealed affordances. */}
@@ -745,7 +749,7 @@ function InfiniteScrollSentinel({
       }}
       className={cn(
         "flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-muted-foreground text-xs hover:bg-muted disabled:pointer-events-none disabled:opacity-50",
-        indent && "pl-7",
+        indent && "pl-5",
       )}
     >
       {isFetching ? (
@@ -868,7 +872,7 @@ function ProjectFolder({
         headerAction={<ProjectFolderActions projectName={name} onNavigate={onRowClick} />}
         footer={
           loadingFirstPage ? (
-            <p className="px-2 py-1 pl-7 text-muted-foreground text-xs">Loading…</p>
+            <p className="px-2 py-1 pl-5 text-muted-foreground text-xs">Loading…</p>
           ) : (
             <InfiniteScrollSentinel
               hasMore={query.hasNextPage}
@@ -1897,12 +1901,11 @@ function ConversationSection({
         <>
           {conversations.length === 0 && emptyMessage ? (
             // Expanded but empty (e.g. a project with no loaded chats).
-            <p className={cn("px-2 py-1 text-muted-foreground text-xs", indentRows && "pl-7")}>
+            <p className={cn("px-2 py-1 text-muted-foreground text-xs", indentRows && "pl-5")}>
               {emptyMessage}
             </p>
           ) : (
-            // Indent project chats so the row text (rows add their own px-4)
-            // lines up with the project-folder name above.
+            // Indent project chats a step under the project-folder name above.
             <ul className={cn("flex flex-col gap-0.5", indentRows && "pl-3")}>
               {conversations.map((conv) => (
                 <ConversationRow
@@ -2370,6 +2373,11 @@ function ConversationRow({
   // The session's current project (reserved label), or null when unfiled —
   // drives the kebab submenu label ("Add to project" vs "Change project").
   const currentProject = conversation.labels?.[PROJECT_LABEL_KEY] ?? null;
+  // Pinned sessions are lifted OUT of their project folder into the flat
+  // "Pinned" section, so the row no longer shows which project it belongs to.
+  // For those rows only, surface the project in a hover flyout. Non-pinned
+  // rows already sit inside their project folder, so they don't need it.
+  const projectFlyoutName = isPinned ? currentProject : null;
 
   const label = conversationDisplayLabel(conversation);
   // Recompute unseen state the moment the last-seen map changes (e.g. the
@@ -2579,7 +2587,7 @@ function ConversationRow({
     <Link
       to={selectionMode ? "#" : `/c/${conversation.id}`}
       className={cn(
-        "relative flex w-full flex-col gap-0.5 rounded-md px-4 py-2 text-left text-sm hover:bg-muted",
+        "relative flex w-full flex-col gap-0.5 rounded-md px-2 py-2 text-left text-sm hover:bg-muted",
         !selectionMode && (sessionState?.kind === "awaiting" ? "pr-48 md:pr-29" : "pr-28 md:pr-16"),
         selectionMode && "pr-10",
         isActive && "bg-muted",
@@ -2605,7 +2613,9 @@ function ConversationRow({
         e.preventDefault();
         setIsEditing(true);
       }}
-      title={conversation.title ?? conversation.id}
+      // The rich project flyout replaces the native tooltip on pinned,
+      // project-owned rows so the two don't stack; other rows keep it.
+      title={projectFlyoutName ? undefined : (conversation.title ?? conversation.id)}
     >
       {/* Row 1: the session name. Status markers (working, needs-approval,
           unseen) render in the trailing time-marker slot below, replacing
@@ -2643,9 +2653,42 @@ function ConversationRow({
           Suppressed in selection mode (bulk-select owns the row), where the
           bare link is rendered instead. ContextMenuTrigger preventDefaults the
           native contextmenu event, so right-click never navigates; asChild
-          merges its handler onto the Link, preserving left-click / double-click. */}
+          merges its handler onto the Link, preserving left-click / double-click.
+          Pinned, project-owned rows nest a HoverCardTrigger around the Link so
+          hovering surfaces the project flyout — the trigger sits innermost so
+          both the context menu and the hover card keep their handlers/refs on
+          the Link. */}
       {selectionMode ? (
-        rowLink
+        projectFlyoutName ? (
+          <HoverCard openDelay={150} closeDelay={0}>
+            <HoverCardTrigger asChild>{rowLink}</HoverCardTrigger>
+            <PinnedProjectFlyoutContent
+              title={conversation.title ?? conversation.id}
+              projectName={projectFlyoutName}
+            />
+          </HoverCard>
+        ) : (
+          rowLink
+        )
+      ) : projectFlyoutName ? (
+        <HoverCard openDelay={150} closeDelay={0}>
+          <ContextMenu>
+            <ContextMenuTrigger asChild>
+              <HoverCardTrigger asChild>{rowLink}</HoverCardTrigger>
+            </ContextMenuTrigger>
+            <ContextMenuContent className="min-w-44 [&_[role=menuitem]]:text-xs">
+              <ConversationMenuItems
+                components={contextBundle}
+                setMenuOpen={() => {}}
+                {...menuItemProps}
+              />
+            </ContextMenuContent>
+          </ContextMenu>
+          <PinnedProjectFlyoutContent
+            title={conversation.title ?? conversation.id}
+            projectName={projectFlyoutName}
+          />
+        </HoverCard>
       ) : (
         <ContextMenu>
           <ContextMenuTrigger asChild>{rowLink}</ContextMenuTrigger>
@@ -2908,6 +2951,42 @@ function ConversationRow({
         </DialogContent>
       </Dialog>
     </li>
+  );
+}
+
+/**
+ * Hover flyout body for a pinned, project-owned conversation row.
+ *
+ * Pinning lifts a session out of its project folder into the flat "Pinned"
+ * section, dropping the visual project cue the folder provided. Hovering the
+ * row surfaces it again: the session title, then a folder icon + project name.
+ * Mirrors {@link AgentHoverCard}'s Cursor-style placement (right / top-aligned)
+ * and the muted, small-icon foreground used elsewhere in the sidebar.
+ */
+function PinnedProjectFlyoutContent({
+  title,
+  projectName,
+}: {
+  title: string;
+  projectName: string;
+}) {
+  return (
+    <HoverCardContent
+      side="right"
+      align="start"
+      sideOffset={8}
+      className="w-64"
+      data-testid="pinned-project-flyout"
+    >
+      {/* Titles have no length cap (server + rename input are unbounded), so
+          clamp to 3 wrapped lines to keep the card tidy — full text stays in
+          the DOM. */}
+      <p className="line-clamp-3 font-medium text-sm">{title}</p>
+      <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+        <FolderIcon className="size-3.5 shrink-0" />
+        <span className="truncate">{projectName}</span>
+      </p>
+    </HoverCardContent>
   );
 }
 
@@ -3300,9 +3379,9 @@ function ConversationEditRow({ initialTitle, onCommit, onCancel }: ConversationE
   }
 
   return (
-    // pl-3 + the input's px-1 line the text up with the row's px-4 title;
+    // pl-1 + the input's px-1 line the text up with the row's px-2 title;
     // py-1 around the size-7 buttons matches the 36px single-line row height.
-    <div className="flex items-center gap-1 rounded-md bg-muted py-1 pr-1 pl-3">
+    <div className="flex items-center gap-1 rounded-md bg-muted py-1 pr-1 pl-1">
       <input
         ref={inputRef}
         type="text"
