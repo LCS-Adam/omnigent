@@ -99,7 +99,11 @@ interface SubagentsPanelProps {
 type ViewMode = "list" | "graph";
 
 export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanelProps) {
-  const { children, isLoading, error } = useChildSessions(rootSessionId);
+  // SSE pushes ``session.child_session.updated`` only for the bound
+  // (active) conversation's direct children. Deeper levels — and the
+  // whole tree when viewing a descendant — have no live channel, so the
+  // poll is the staleness floor for those nodes.
+  const { children, isLoading, error } = useChildSessions(rootSessionId, TREE_POLL_MS);
   const [addOpen, setAddOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
 
@@ -679,6 +683,8 @@ function MainRow({ rootSessionId, isActive }: { rootSessionId: string; isActive:
   );
 }
 
+const TREE_POLL_MS = 15_000;
+
 // Indentation: depth 1 keeps the original 24px gutter (pl-6); each
 // further level steps in by another 14px so the connector glyphs read
 // as a tree.
@@ -706,7 +712,10 @@ function SubagentRow({
   const dim = !isActive && SETTLED_STATE[status.activity];
   // Disabled (null id) at the depth cap so the fan-out is bounded;
   // ``useChildSessions`` skips the query entirely for null.
-  const { children: grandchildren } = useChildSessions(depth < MAX_TREE_DEPTH ? child.id : null);
+  const { children: grandchildren } = useChildSessions(
+    depth < MAX_TREE_DEPTH ? child.id : null,
+    TREE_POLL_MS,
+  );
   return (
     <>
       <li>
