@@ -1266,6 +1266,18 @@ async def test_mid_spawn_double_cancellation_still_reaps(
 # ── Release / shutdown vs cold-spawn races ───────────────────────
 
 
+async def _cancel_pending(*tasks: asyncio.Task[object] | None) -> None:
+    """Cancel any still-pending tasks so a failed assertion cannot hang teardown."""
+    for task in tasks:
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+                # Bind the result so static analysis does not treat the await
+                # as a dead statement (teardown only cares that the task settles).
+                _settled = await task
+                del _settled
+
+
 async def test_release_during_spawn_leaves_no_live_process(
     manager: HarnessProcessManager,
     monkeypatch: pytest.MonkeyPatch,
@@ -1319,10 +1331,9 @@ async def test_release_during_spawn_leaves_no_live_process(
         assert not release_task.done(), "release returned before spawn released the lock"
 
         allow_bind.set()
-        await get_task
-        await release_task
-        get_task = None
-        release_task = None
+        client = await get_task
+        assert client is not None
+        assert await release_task is None
 
         socket_path = manager.instance_dir / f"conv-{conv_id}.sock"
         assert not manager.has_session(conv_id)
@@ -1336,11 +1347,7 @@ async def test_release_during_spawn_leaves_no_live_process(
         assert process.returncode is not None
     finally:
         allow_bind.set()
-        for task in (get_task, release_task):
-            if task is not None and not task.done():
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, RuntimeError):
-                    await task
+        await _cancel_pending(get_task, release_task)
         await manager.shutdown()
 
 
@@ -1397,14 +1404,16 @@ async def test_release_invalidates_queued_get_client(
         assert not get_b.done()
 
         allow_bind.set()
-        await get_a
-        await release_task
-        get_a = None
-        release_task = None
+        client_a = await get_a
+        assert client_a is not None
+        assert await release_task is None
 
-        with pytest.raises(RuntimeError, match="was released while get_client waited"):
-            await get_b
-        get_b = None
+        done, pending = await asyncio.wait({get_b})
+        assert not pending
+        assert done == {get_b}
+        exc = get_b.exception()
+        assert isinstance(exc, RuntimeError)
+        assert "was released while get_client waited" in str(exc)
 
         assert len(spawned) == 1, "queued get_client respawned after release"
         assert not manager.has_session(conv_id)
@@ -1424,11 +1433,7 @@ async def test_release_invalidates_queued_get_client(
         assert len(spawned) == 2
     finally:
         allow_bind.set()
-        for task in (get_a, get_b, release_task):
-            if task is not None and not task.done():
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, RuntimeError):
-                    await task
+        await _cancel_pending(get_a, get_b, release_task)
         await manager.shutdown()
 
 
@@ -1486,14 +1491,13 @@ async def test_shutdown_during_spawn_leaves_no_live_process(
         allow_bind.set()
         # Spawn either registers-then-gets-released, or discards on the
         # shutting-down check — assert the shutdown-specific errors only.
-        with pytest.raises(
-            RuntimeError,
-            match=r"(called during shutdown|shut down during spawn)",
-        ):
-            await get_task
-        get_task = None
-        await shutdown_task
-        shutdown_task = None
+        done, pending = await asyncio.wait({get_task})
+        assert not pending
+        assert done == {get_task}
+        exc = get_task.exception()
+        assert isinstance(exc, RuntimeError)
+        assert "shutdown" in str(exc).lower()
+        assert await shutdown_task is None
 
         assert not manager.has_session(conv_id)
         assert conv_id not in manager._entries
@@ -1506,10 +1510,6 @@ async def test_shutdown_during_spawn_leaves_no_live_process(
         assert process.returncode is not None
     finally:
         allow_bind.set()
-        for task in (get_task, shutdown_task):
-            if task is not None and not task.done():
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, RuntimeError):
-                    await task
+        await _cancel_pending(get_task, shutdown_task)
         # Idempotent if the test already shut down; still safe if it failed early.
         await manager.shutdown()
