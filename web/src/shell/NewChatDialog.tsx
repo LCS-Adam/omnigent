@@ -96,7 +96,6 @@ import {
 import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 import { useRecentWorkspaces } from "@/hooks/useRecentWorkspaces";
 import { useDirectorySessions } from "@/hooks/useDirectorySessions";
-import { useRunnerHealthRegistration } from "@/hooks/RunnerHealthProvider";
 import { useHostFilesystem, type HostFilesystemEntry } from "@/hooks/useHostFilesystem";
 import { useHostWorktrees } from "@/hooks/useHostWorktrees";
 import { useNativeServerSwitcherForMainSurface } from "@/hooks/useNativeServerSwitcher";
@@ -1730,9 +1729,6 @@ export function NewChatLandingScreen() {
   const { data: agents } = useAvailableAgents();
   const brainHarnessLabels = useBrainHarnessLabels();
   const { data: hosts, isLoading: hostsLoading } = useHosts();
-  // Sessions the caller can access, to warn when a new session would share a
-  // working directory with a live one (see the conflict tooltip below).
-  const { data: directorySessions } = useDirectorySessions(true);
 
   const agentList = useMemo(
     () =>
@@ -1844,6 +1840,9 @@ export function NewChatLandingScreen() {
   const [selectedHostId, setSelectedHostId] = useState<string | null>(
     () => landingDraft?.selectedHostId ?? null,
   );
+  // Sessions on the selected host — fetched only when a host is selected,
+  // to avoid registering hundreds of sessions into the health poll at idle.
+  const { data: directorySessions } = useDirectorySessions(selectedHostId !== null);
   // True when the user picked the sandbox option instead of a connected
   // host — the server provisions a sandbox host at create time
   // (host_type: "managed"), so no host_id or workspace is sent.
@@ -2216,27 +2215,21 @@ export function NewChatLandingScreen() {
   const isCloudHost =
     sandboxSelected || (selectedHost?.name?.toLowerCase().includes("cloud") ?? false);
 
-  // Sessions on the selected host that have a workspace — candidates for a
-  // directory conflict, fed to the runner-health poll so only *connected*
-  // agents count (same /health signal as the sidebar dots).
-  const conflictCandidates = useMemo(
-    () =>
-      (directorySessions ?? []).filter((s) => s.host_id === selectedHostId && s.workspace != null),
-    [directorySessions, selectedHostId],
-  );
-  const runnerHealth = useRunnerHealthRegistration(conflictCandidates);
   // Count of live agents per normalized directory on this host. The file
   // browser uses this to warn when you navigate into an occupied directory.
+  // Uses runner_online from the session list response directly — good enough
+  // for a conflict hint without registering hundreds of sessions into the
+  // /health poll.
   const occupancyByDir = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const s of conflictCandidates) {
-      if (s.workspace == null || runnerHealth.get(s.id) !== true) continue;
+    for (const s of directorySessions ?? []) {
+      if (s.host_id !== selectedHostId || s.workspace == null || s.runner_online !== true) continue;
       const dir = normalizeWorkspacePath(s.workspace);
       if (dir === null) continue;
       counts.set(dir, (counts.get(dir) ?? 0) + 1);
     }
     return counts;
-  }, [conflictCandidates, runnerHealth]);
+  }, [directorySessions, selectedHostId]);
 
   // Existing git worktrees of the picked directory's repo, for the
   // worktree picker. Skipped for sandbox sessions (server-managed) and
@@ -2426,17 +2419,15 @@ export function NewChatLandingScreen() {
     if (mentionFsQuery.isPlaceholderData) return [];
     const rows = (mentionFsQuery.data?.entries ?? [])
       .filter((e) => e.type === "directory" || e.type === "file")
-      .map(
-        (e): WorkspaceFile => ({
-          path: e.path.startsWith(workspaceRoot)
-            ? e.path.slice(workspaceRoot.length).replace(/^\/+/, "")
-            : e.name,
-          name: e.name,
-          type: e.type === "directory" ? "directory" : "file",
-          bytes: e.bytes,
-          modified_at: e.modified_at,
-        }),
-      );
+      .map((e): WorkspaceFile => ({
+        path: e.path.startsWith(workspaceRoot)
+          ? e.path.slice(workspaceRoot.length).replace(/^\/+/, "")
+          : e.name,
+        name: e.name,
+        type: e.type === "directory" ? "directory" : "file",
+        bytes: e.bytes,
+        modified_at: e.modified_at,
+      }));
     return rankMentionEntries(rows, mentionFilter);
   }, [
     mentionEnabled,
