@@ -19,16 +19,12 @@ from omnigent.server.auth import LEVEL_OWNER, AuthProvider
 from omnigent.server.routes._auth_helpers import require_access, require_user
 from omnigent.server.routes._content_type import require_json_content_type
 from omnigent.session_import import (
-    IMPORT_DIGEST_LABEL_KEY,
     IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY,
-    IMPORT_ITEM_COUNT_LABEL_KEY,
     IMPORT_SOURCE_LABEL_KEY,
     ImportSource,
-    conversation_items_digest,
     title_from_items,
 )
 from omnigent.stores import AgentStore, ConversationStore
-from omnigent.stores.conversation_store import ImportedPrefixMismatchError
 from omnigent.stores.permission_store import PermissionStore
 
 
@@ -58,7 +54,6 @@ class ImportSessionRequest(BaseModel):
     external_session_id: str = Field(min_length=1, max_length=128)
     workspace: str | None = Field(default=None, max_length=2048)
     items: list[ImportItemInput] = Field(max_length=100_000)
-    force: bool = False
 
     @field_validator("external_session_id")
     @classmethod
@@ -74,7 +69,7 @@ class ImportSessionResponse(BaseModel):
     """Result of importing or locating one source session."""
 
     session_id: str
-    status: Literal["imported", "already_imported", "replaced"]
+    status: Literal["imported"]
     item_count: int
 
 
@@ -129,7 +124,7 @@ def create_imports_router(
         request: Request,
         response: Response,
     ) -> ImportSessionResponse:
-        """Import one normalized transcript or return its existing session."""
+        """Import one normalized transcript, rejecting duplicate sources."""
         user_id = require_user(request, auth_provider)
         items = [item.to_item() for item in body.items]
         existing = await asyncio.to_thread(
@@ -145,36 +140,9 @@ def create_imports_router(
                 permission_store,
                 conversation_store,
             )
-            if not body.force:
-                response.status_code = 200
-                return ImportSessionResponse(
-                    session_id=existing.id,
-                    status="already_imported",
-                    item_count=int(existing.labels.get(IMPORT_ITEM_COUNT_LABEL_KEY, "0")),
-                )
-            try:
-                expected_count = int(existing.labels[IMPORT_ITEM_COUNT_LABEL_KEY])
-                expected_digest = existing.labels[IMPORT_DIGEST_LABEL_KEY]
-            except (KeyError, ValueError) as exc:
-                raise OmnigentError(
-                    "This session has incomplete import provenance and cannot be replaced safely",
-                    code=ErrorCode.CONFLICT,
-                ) from exc
-            try:
-                await asyncio.to_thread(
-                    conversation_store.replace_imported_prefix,
-                    existing.id,
-                    items,
-                    expected_count=expected_count,
-                    expected_digest=expected_digest,
-                )
-            except ImportedPrefixMismatchError as exc:
-                raise OmnigentError(str(exc), code=ErrorCode.CONFLICT) from exc
-            response.status_code = 200
-            return ImportSessionResponse(
-                session_id=existing.id,
-                status="replaced",
-                item_count=len(items),
+            raise OmnigentError(
+                f"This {body.source} session has already been imported as {existing.id}",
+                code=ErrorCode.CONFLICT,
             )
 
         native_agent = native_coding_agent_for_harness(f"{body.source}-native")
@@ -207,8 +175,6 @@ def create_imports_router(
                 **native_agent.presentation_labels,
                 IMPORT_SOURCE_LABEL_KEY: body.source,
                 IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY: body.external_session_id,
-                IMPORT_ITEM_COUNT_LABEL_KEY: str(len(items)),
-                IMPORT_DIGEST_LABEL_KEY: conversation_items_digest(items),
             }
             await asyncio.to_thread(conversation_store.set_labels, conversation.id, labels)
             if permission_store is not None and user_id is not None:

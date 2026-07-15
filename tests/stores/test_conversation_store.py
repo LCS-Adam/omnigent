@@ -16,113 +16,16 @@ from omnigent.entities import (
 )
 from omnigent.server.auth import RESERVED_USER_LOCAL
 from omnigent.session_import import (
-    IMPORT_DIGEST_LABEL_KEY,
     IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY,
-    IMPORT_ITEM_COUNT_LABEL_KEY,
     IMPORT_SOURCE_LABEL_KEY,
-    conversation_items_digest,
 )
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
-from omnigent.stores.conversation_store import ImportedPrefixMismatchError
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
 from omnigent.stores.host_store import HostStore
 
 # ── CRUD ──────────────────────────────────────────────
-
-
-def test_replace_imported_prefix_preserves_later_session_state(
-    conversation_store: SqlAlchemyConversationStore,
-) -> None:
-    """Forced re-import replaces only source history on the same session."""
-    original = [
-        NewConversationItem(
-            type="message",
-            response_id="claude:turn-1",
-            data=MessageData(
-                role="user",
-                content=[{"type": "input_text", "text": "old prompt"}],
-            ),
-        ),
-        NewConversationItem(
-            type="message",
-            response_id="claude:turn-1",
-            data=MessageData(
-                role="assistant",
-                content=[{"type": "output_text", "text": "old answer"}],
-                agent="claude-native-ui",
-            ),
-        ),
-    ]
-    replacement = [
-        NewConversationItem(
-            type="message",
-            response_id="claude:turn-1",
-            data=MessageData(
-                role="user",
-                content=[{"type": "input_text", "text": "new prompt"}],
-            ),
-        ),
-        NewConversationItem(
-            type="message",
-            response_id="claude:turn-1",
-            data=MessageData(
-                role="assistant",
-                content=[{"type": "output_text", "text": "new answer"}],
-                agent="claude-native-ui",
-            ),
-        ),
-    ]
-    conversation = conversation_store.create_conversation(title="Kept title")
-    conversation_store.set_external_session_id(conversation.id, "claude-source-id")
-    conversation_store.append(conversation.id, original)
-    conversation_store.set_labels(
-        conversation.id,
-        {
-            IMPORT_SOURCE_LABEL_KEY: "claude",
-            IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY: "claude-source-id",
-            IMPORT_ITEM_COUNT_LABEL_KEY: str(len(original)),
-            IMPORT_DIGEST_LABEL_KEY: conversation_items_digest(original),
-            "omni_project": "Kept project",
-        },
-    )
-    later = conversation_store.append(
-        conversation.id,
-        [
-            NewConversationItem(
-                type="message",
-                response_id="omnigent:turn-2",
-                data=MessageData(
-                    role="user",
-                    content=[{"type": "input_text", "text": "later prompt"}],
-                ),
-            )
-        ],
-    )[0]
-
-    conversation_store.replace_imported_prefix(
-        conversation.id,
-        replacement,
-        expected_count=len(original),
-        expected_digest=conversation_items_digest(original),
-    )
-
-    items = conversation_store.list_items(conversation.id, limit=20).data
-    assert [item.data.content[0]["text"] for item in items] == [  # type: ignore[union-attr]
-        "new prompt",
-        "new answer",
-        "later prompt",
-    ]
-    assert items[-1].id == later.id
-    reloaded = conversation_store.get_conversation(conversation.id)
-    assert reloaded is not None
-    assert reloaded.id == conversation.id
-    assert reloaded.title == "Kept title"
-    assert reloaded.external_session_id == "claude-source-id"
-    assert reloaded.labels["omni_project"] == "Kept project"
-    found = conversation_store.find_imported_conversation("claude", "claude-source-id")
-    assert found is not None and found.id == conversation.id
 
 
 def test_fork_drops_import_provenance_labels(
@@ -135,8 +38,6 @@ def test_fork_drops_import_provenance_labels(
         {
             IMPORT_SOURCE_LABEL_KEY: "claude",
             IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY: "source-id",
-            IMPORT_ITEM_COUNT_LABEL_KEY: "0",
-            IMPORT_DIGEST_LABEL_KEY: conversation_items_digest([]),
             "kept": "yes",
         },
     )
@@ -146,45 +47,6 @@ def test_fork_drops_import_provenance_labels(
     assert fork.labels["kept"] == "yes"
     assert IMPORT_SOURCE_LABEL_KEY not in fork.labels
     assert IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY not in fork.labels
-    assert IMPORT_ITEM_COUNT_LABEL_KEY not in fork.labels
-    assert IMPORT_DIGEST_LABEL_KEY not in fork.labels
-
-
-def test_replace_imported_prefix_rejects_modified_history(
-    conversation_store: SqlAlchemyConversationStore,
-) -> None:
-    """Force fails closed when the recorded import boundary no longer matches."""
-    conversation = conversation_store.create_conversation()
-    original = NewConversationItem(
-        type="message",
-        response_id="source:turn-1",
-        data=MessageData(
-            role="user",
-            content=[{"type": "input_text", "text": "original"}],
-        ),
-    )
-    stored = conversation_store.append(conversation.id, [original])[0]
-
-    with pytest.raises(ImportedPrefixMismatchError, match="modified"):
-        conversation_store.replace_imported_prefix(
-            conversation.id,
-            [
-                NewConversationItem(
-                    type="message",
-                    response_id="source:turn-1",
-                    data=MessageData(
-                        role="user",
-                        content=[{"type": "input_text", "text": "replacement"}],
-                    ),
-                )
-            ],
-            expected_count=1,
-            expected_digest="not-the-stored-digest",
-        )
-
-    items = conversation_store.list_items(conversation.id).data
-    assert [item.id for item in items] == [stored.id]
-    assert items[0].data == original.data
 
 
 def test_create_and_get(conversation_store: SqlAlchemyConversationStore) -> None:

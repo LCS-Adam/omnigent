@@ -43,7 +43,7 @@ def test_import_command_loads_local_session_and_posts_normalized_items(tmp_path:
     with patch("omnigent.cli._resolve_attach_server", return_value=_BASE):
         result = CliRunner().invoke(
             cli,
-            ["import", "--harness", "claude", "--session", session_id, "--force"],
+            ["import", "--harness", "claude", "--session", session_id],
             env={"HOME": str(tmp_path)},
         )
 
@@ -56,7 +56,6 @@ def test_import_command_loads_local_session_and_posts_normalized_items(tmp_path:
         "source": "claude",
         "external_session_id": session_id,
         "workspace": "/repo",
-        "force": True,
         "items": [
             {
                 "type": "message",

@@ -5963,11 +5963,6 @@ def resume(
     help="Harness-native session ID to import.",
 )
 @click.option(
-    "--force",
-    is_flag=True,
-    help="Replace the previously imported source history on the same Omnigent session.",
-)
-@click.option(
     "--server",
     default=None,
     help=(
@@ -5978,19 +5973,17 @@ def resume(
 def import_session_command(
     harness: str,
     source_session_id: str,
-    force: bool,
     server: str | None,
 ) -> None:
     """Import one local Claude Code, Codex, or Cursor chat.
 
     The source transcript is converted to ordinary Omnigent items and stored
-    as a normal session. Re-running the command is idempotent; use ``--force``
-    to refresh the imported history while preserving later Omnigent turns.
+    as a normal session. A source session can only be imported once.
 
     \b
     Examples:
       omnigent import --harness claude --session <session-id>
-      omnigent import --harness codex --session <session-id> --force
+      omnigent import --harness codex --session <session-id>
       omnigent import --harness cursor --session <session-id>
     """
     import httpx
@@ -6016,7 +6009,6 @@ def import_session_command(
         "source": imported.source,
         "external_session_id": imported.external_session_id,
         "workspace": imported.workspace,
-        "force": force,
         "items": [
             {
                 "type": item.type,
@@ -6048,16 +6040,7 @@ def import_session_command(
     result = response.json()
     session_id = result["session_id"]
     item_count = result["item_count"]
-    status = result["status"]
-    if status == "already_imported":
-        click.echo(
-            f"Session {source_session_id} is already imported as {session_id} "
-            f"({item_count} item(s))."
-        )
-    elif status == "replaced":
-        click.echo(f"Replaced imported history in {session_id} with {item_count} item(s).")
-    else:
-        click.echo(f"Imported {item_count} item(s) into {session_id}.")
+    click.echo(f"Imported {item_count} item(s) into {session_id}.")
 
 
 @cli.group("session", invoke_without_command=True)

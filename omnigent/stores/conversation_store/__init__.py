@@ -169,10 +169,6 @@ class ConversationNotFoundError(Exception):
     """
 
 
-class ImportedPrefixMismatchError(Exception):
-    """Raised when forced import can no longer identify its original prefix."""
-
-
 class NameAlreadyExistsError(Exception):
     """
     Raised by ``create_conversation`` when the requested
@@ -491,27 +487,6 @@ class ConversationStore(ABC):
             to persist.
         :returns: The persisted :class:`ConversationItem` list
             with store-assigned IDs and timestamps.
-        """
-        ...
-
-    @abstractmethod
-    def replace_imported_prefix(
-        self,
-        conversation_id: str,
-        items: list[NewConversationItem],
-        *,
-        expected_count: int,
-        expected_digest: str,
-    ) -> list[ConversationItem]:
-        """Replace a verified imported item prefix and preserve later items.
-
-        :param conversation_id: Existing imported conversation id.
-        :param items: Replacement normalized source items.
-        :param expected_count: Number of items in the prior imported prefix.
-        :param expected_digest: Digest recorded for that prior prefix.
-        :returns: Newly persisted replacement items.
-        :raises ImportedPrefixMismatchError: If the stored prefix no longer
-            matches the recorded import boundary.
         """
         ...
 

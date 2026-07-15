@@ -2,27 +2,21 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from omnigent.entities import ConversationItem, MessageData, NewConversationItem
+from omnigent.entities import MessageData, NewConversationItem
 from omnigent.entities.conversation import synthesize_conversation_title
 
 ImportSource = Literal["claude", "codex", "cursor"]
 
 IMPORT_SOURCE_LABEL_KEY = "omnigent.import.source"
 IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY = "omnigent.import.external_session_id"
-IMPORT_ITEM_COUNT_LABEL_KEY = "omnigent.import.item_count"
-IMPORT_DIGEST_LABEL_KEY = "omnigent.import.digest"
 IMPORT_PROVENANCE_LABEL_KEYS = frozenset(
     {
         IMPORT_SOURCE_LABEL_KEY,
         IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY,
-        IMPORT_ITEM_COUNT_LABEL_KEY,
-        IMPORT_DIGEST_LABEL_KEY,
     }
 )
 
@@ -56,23 +50,3 @@ def title_from_items(items: Sequence[NewConversationItem]) -> str | None:
         ):
             return synthesize_conversation_title(item.data.content)
     return None
-
-
-def conversation_items_digest(
-    items: Sequence[NewConversationItem | ConversationItem],
-    *,
-    include_created_by: bool = True,
-) -> str:
-    """Return a stable digest of item content, excluding database identity."""
-    normalized: list[dict[str, object]] = []
-    for item in items:
-        value: dict[str, object] = {
-            "type": item.type,
-            "response_id": item.response_id,
-            "data": item.data.model_dump(mode="json", exclude_none=True),
-        }
-        if include_created_by:
-            value["created_by"] = item.created_by
-        normalized.append(value)
-    payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
