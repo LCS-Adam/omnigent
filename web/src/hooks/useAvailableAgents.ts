@@ -184,25 +184,16 @@ async function scanSessionAgents(): Promise<ScannedSessionAgent[]> {
   return Array.from(seen.values());
 }
 
-/** Wire shape of `GET /v1/sessions/{id}/agent` (AgentObject). */
-interface AgentObjectWire {
-  id: string;
-  name: string;
-  description?: string | null;
-  harness?: string | null;
-  skills?: { name: string; description: string }[];
-}
-
 /**
- * Enrich one scanned session agent into the picker's AvailableAgent
- * shape via `GET /v1/sessions/{id}/agent` (description, harness,
- * bundled skills). On failure the agent is still listed with the
- * name-only fields from the scan — mirroring the server's own
- * `_to_agent_object` degradation: one unloadable bundle must not
- * break discovery.
+ * Build an AvailableAgent from session scan data alone — no extra fetch.
+ * description, harness, and skills are omitted; they can be loaded lazily
+ * via useSessionAgent once the user has selected an agent.
+ *
+ * Session-discovered agents are always custom uploads, never native coding
+ * agents, so a null harness doesn't affect display or classification.
  */
-async function enrichSessionAgent(scanned: ScannedSessionAgent): Promise<AvailableAgent> {
-  const fallback: AvailableAgent = {
+function sessionAgentFromScan(scanned: ScannedSessionAgent): AvailableAgent {
+  return {
     id: scanned.agentId,
     name: scanned.agentName,
     display_name: displayNameForAgent(scanned.agentName),
@@ -213,24 +204,6 @@ async function enrichSessionAgent(scanned: ScannedSessionAgent): Promise<Availab
     // seed the catalog, and their recency comes from the scanned session's
     // createdAt (used directly in the dedup), not from this object.
   };
-  try {
-    const res = await authenticatedFetch(
-      `/v1/sessions/${encodeURIComponent(scanned.sessionId)}/agent`,
-    );
-    if (!res.ok) return fallback;
-    const json = (await res.json()) as AgentObjectWire;
-    return {
-      ...fallback,
-      display_name: displayNameForAgent(json.name, json.harness),
-      description: json.description ?? null,
-      harness: json.harness ?? null,
-      skills: json.skills ?? [],
-    };
-  } catch {
-    // Network-level failure — same best-effort degradation as the
-    // non-ok branch above: list the agent from scan fields.
-    return fallback;
-  }
 }
 
 /**
@@ -326,16 +299,12 @@ async function fetchAvailableAgents(): Promise<AvailableAgent[]> {
     }
   }
 
-  const resolved = (
-    await Promise.all(
-      Array.from(byName.values()).map((c) =>
-        c.template !== null ? Promise.resolve(c.template) : enrichSessionAgent(c.scanned!),
-      ),
-    )
-  ).filter((agent) => {
-    const nativeKey = nativeCodingAgentForAvailableAgent(agent)?.key;
-    return nativeKey !== "kiro" || !hasKiroBuiltin;
-  });
+  const resolved = Array.from(byName.values())
+    .map((c) => (c.template !== null ? c.template : sessionAgentFromScan(c.scanned!)))
+    .filter((agent) => {
+      const nativeKey = nativeCodingAgentForAvailableAgent(agent)?.key;
+      return nativeKey !== "kiro" || !hasKiroBuiltin;
+    });
   // Seeded built-ins first; user templates / custom uploads follow, newest
   // first. NewChatDialog's display-order sort is stable, so unranked names
   // keep this relative order.
