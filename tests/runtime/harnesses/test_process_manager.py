@@ -1261,3 +1261,144 @@ async def test_mid_spawn_double_cancellation_still_reaps(
         assert not manager.has_session("conv_leak2")
     finally:
         await manager.shutdown()
+
+
+# ── Release / shutdown vs cold-spawn races ───────────────────────
+
+
+async def test_release_during_spawn_leaves_no_live_process(
+    manager: HarnessProcessManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``release`` during cold spawn must not lose to a late registration.
+
+    ``get_client`` holds the per-conversation spawn lock across
+    ``_wait_for_bind``, but ``release`` used to only inspect ``_entries``
+    under the registry lock. A release that arrived mid-bind saw no entry
+    and returned; the spawn then registered a live process that nobody
+    owned. Barriers pin the race: release is queued while bind is gated,
+    then bind completes so both sides settle under the shared spawn lock.
+    """
+    from omnigent.runtime.harnesses import process_manager as pm_mod
+
+    await manager.start()
+    try:
+        spawned: list[asyncio.subprocess.Process] = []
+        real_exec = asyncio.create_subprocess_exec
+
+        async def capturing_exec(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            process = await real_exec(*args, **kwargs)  # type: ignore[arg-type]
+            spawned.append(process)
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", capturing_exec)
+
+        in_bind = asyncio.Event()
+        allow_bind = asyncio.Event()
+        real_wait_for_bind = pm_mod._wait_for_bind
+
+        async def gated_bind(*args: object, **kwargs: object) -> None:
+            in_bind.set()
+            await allow_bind.wait()
+            await real_wait_for_bind(*args, **kwargs)
+
+        monkeypatch.setattr(pm_mod, "_wait_for_bind", gated_bind)
+
+        conv_id = "conv_release_during_spawn"
+        get_task = asyncio.create_task(manager.get_client(conv_id, _TEST_HARNESS_NAME))
+        await asyncio.wait_for(in_bind.wait(), timeout=10.0)
+        assert spawned, "spawn was never reached"
+        process = spawned[0]
+        pid = process.pid
+
+        # Queued behind the spawn lock until bind is allowed to finish.
+        release_task = asyncio.create_task(manager.release(conv_id))
+        await asyncio.sleep(0)
+        assert not release_task.done(), "release returned before spawn released the lock"
+
+        allow_bind.set()
+        await get_task
+        await release_task
+
+        socket_path = manager.instance_dir / f"conv-{conv_id}.sock"
+        assert not manager.has_session(conv_id)
+        assert conv_id not in manager._entries
+        assert not socket_path.exists()
+        for _ in range(40):
+            if not _pid_alive(pid):
+                break
+            await asyncio.sleep(0.05)
+        assert not _pid_alive(pid), "release-during-spawn left a live harness process"
+        assert process.returncode is not None
+    finally:
+        await manager.shutdown()
+
+
+async def test_shutdown_during_spawn_leaves_no_live_process(
+    manager: HarnessProcessManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``shutdown`` during cold spawn must not leave an unregistered process.
+
+    Shutdown used to walk only ``_entries``. A spawn still awaiting
+    readiness was invisible, so shutdown could finish and the spawn
+    could then register a live process against a torn-down manager.
+    Barriers pin the race; after both settle there must be no process,
+    socket, or ``_entries`` record.
+    """
+    from omnigent.runtime.harnesses import process_manager as pm_mod
+
+    await manager.start()
+    try:
+        spawned: list[asyncio.subprocess.Process] = []
+        real_exec = asyncio.create_subprocess_exec
+
+        async def capturing_exec(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            process = await real_exec(*args, **kwargs)  # type: ignore[arg-type]
+            spawned.append(process)
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", capturing_exec)
+
+        in_bind = asyncio.Event()
+        allow_bind = asyncio.Event()
+        real_wait_for_bind = pm_mod._wait_for_bind
+
+        async def gated_bind(*args: object, **kwargs: object) -> None:
+            in_bind.set()
+            await allow_bind.wait()
+            await real_wait_for_bind(*args, **kwargs)
+
+        monkeypatch.setattr(pm_mod, "_wait_for_bind", gated_bind)
+
+        conv_id = "conv_shutdown_during_spawn"
+        get_task = asyncio.create_task(manager.get_client(conv_id, _TEST_HARNESS_NAME))
+        await asyncio.wait_for(in_bind.wait(), timeout=10.0)
+        assert spawned, "spawn was never reached"
+        process = spawned[0]
+        pid = process.pid
+        socket_path = manager.instance_dir / f"conv-{conv_id}.sock"
+
+        shutdown_task = asyncio.create_task(manager.shutdown())
+        await asyncio.sleep(0)
+        assert not shutdown_task.done(), "shutdown finished before in-flight spawn drained"
+
+        allow_bind.set()
+        # Spawn either registers-then-gets-released, or discards on the
+        # shutting-down check; either way get_client may raise.
+        with contextlib.suppress(RuntimeError):
+            await get_task
+        await shutdown_task
+
+        assert not manager.has_session(conv_id)
+        assert conv_id not in manager._entries
+        assert not socket_path.exists()
+        for _ in range(40):
+            if not _pid_alive(pid):
+                break
+            await asyncio.sleep(0.05)
+        assert not _pid_alive(pid), "shutdown-during-spawn left a live harness process"
+        assert process.returncode is not None
+    finally:
+        # Idempotent if the test already shut down; still safe if it failed early.
+        await manager.shutdown()

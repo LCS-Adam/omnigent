@@ -579,6 +579,9 @@ class HarnessProcessManager:
         self._registry_lock = asyncio.Lock()
         self._reaper_task: asyncio.Task[None] | None = None
         self._started = False
+        # Set at the start of ``shutdown`` so an in-flight cold spawn
+        # cannot register a live process after teardown begins.
+        self._shutting_down = False
 
     @property
     def instance_dir(self) -> Path:
@@ -617,6 +620,7 @@ class HarnessProcessManager:
         """
         if self._started:
             return
+        self._shutting_down = False
         self._tmp_parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
         # Sweep BEFORE creating our own dir, so a crashed prior
         # instance whose dir uuid happens to collide with ours
@@ -692,6 +696,12 @@ class HarnessProcessManager:
             raise RuntimeError("HarnessProcessManager.get_client called before start()")
         spawn_lock = await self._get_spawn_lock(conversation_id)
         async with spawn_lock:
+            # ``release`` / ``shutdown`` take this same lock, so a teardown
+            # that started while we were waiting cannot race the spawn below.
+            if self._shutting_down:
+                raise RuntimeError(
+                    "HarnessProcessManager.get_client called during shutdown"
+                )
             entry = self._entries.get(conversation_id)
             if entry is not None and entry.process.returncode is not None:
                 # Prior subprocess died; drop the stale entry and
@@ -753,6 +763,15 @@ class HarnessProcessManager:
                         f"no live harness subprocess for conversation {conversation_id!r}"
                     )
                 entry = await self._spawn_entry(conversation_id, harness, env)
+                # Shutdown may have begun while we awaited readiness; discard
+                # rather than registering a process that ``shutdown``'s entry
+                # walk would miss.
+                if self._shutting_down:
+                    await self._close_entry(entry)
+                    raise RuntimeError(
+                        "HarnessProcessManager shut down during spawn for "
+                        f"conversation {conversation_id!r}"
+                    )
                 self._entries[conversation_id] = entry
             # Use ``time.monotonic()`` directly rather than
             # ``asyncio.get_running_loop().time()`` so the value is
@@ -936,29 +955,39 @@ class HarnessProcessManager:
         that bound becomes a real problem, switch to a TTL-based
         lock cache.
 
+        Acquires the per-conversation spawn lock before touching
+        ``_entries`` so a ``release`` that arrives while ``get_client``
+        is still awaiting readiness cannot return early (no entry yet)
+        and then lose to a late registration. Lock order is spawn lock
+        then ``_registry_lock`` — never the reverse while holding both —
+        so this cannot deadlock with ``_get_spawn_lock`` (registry only,
+        briefly, before the spawn lock is acquired).
+
         :param conversation_id: AP-allocated conversation id.
         """
-        async with self._registry_lock:
-            if only_if_idle_cutoff is not None:
-                current = self._entries.get(conversation_id)
-                if (
-                    current is None
-                    or current.last_used_at > only_if_idle_cutoff
-                    or conversation_id in self._in_flight_response_ids
-                ):
-                    _logger.info(
-                        "skipping idle reap for conversation %s: entry became "
-                        "active or was already released during the pass",
-                        conversation_id,
-                    )
-                    return
-            entry = self._entries.pop(conversation_id, None)
-            # NOTE: ``_spawn_locks[conversation_id]`` intentionally
-            # NOT popped — see this method's docstring for the
-            # per-conv lock-identity invariant rationale.
-        if entry is None:
-            return
-        await self._close_entry(entry)
+        spawn_lock = await self._get_spawn_lock(conversation_id)
+        async with spawn_lock:
+            async with self._registry_lock:
+                if only_if_idle_cutoff is not None:
+                    current = self._entries.get(conversation_id)
+                    if (
+                        current is None
+                        or current.last_used_at > only_if_idle_cutoff
+                        or conversation_id in self._in_flight_response_ids
+                    ):
+                        _logger.info(
+                            "skipping idle reap for conversation %s: entry became "
+                            "active or was already released during the pass",
+                            conversation_id,
+                        )
+                        return
+                entry = self._entries.pop(conversation_id, None)
+                # NOTE: ``_spawn_locks[conversation_id]`` intentionally
+                # NOT popped — see this method's docstring for the
+                # per-conv lock-identity invariant rationale.
+            if entry is None:
+                return
+            await self._close_entry(entry)
 
     async def shutdown(self) -> None:
         """
@@ -972,13 +1001,23 @@ class HarnessProcessManager:
         """
         if not self._started:
             return
+        # Flip before cancelling the reaper / releasing so an in-flight
+        # ``get_client`` that is past its spawn-lock wait still discards
+        # rather than registering after we finish draining.
+        self._shutting_down = True
         if self._reaper_task is not None:
             self._reaper_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reaper_task
             self._reaper_task = None
-        # Snapshot then iterate — release mutates ``_entries``.
-        for conv_id in list(self._entries):
+        # Include spawn-lock keys so a cold spawn that has not yet
+        # registered in ``_entries`` is still linearized with ``release``
+        # (``release`` waits on the spawn lock, then tears down whatever
+        # got registered). Snapshot under the registry lock; ``release``
+        # mutates ``_entries``.
+        async with self._registry_lock:
+            conv_ids = list(set(self._entries) | set(self._spawn_locks))
+        for conv_id in conv_ids:
             await self.release(conv_id)
         # Best-effort cleanup of our instance dir. If a subprocess
         # we couldn't kill is still holding a socket file, the
