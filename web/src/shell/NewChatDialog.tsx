@@ -1393,6 +1393,11 @@ function AgentHarnessPicker({
       : stored.model != null && CLAUDE_NATIVE_MODELS.some((m) => m.id === stored.model)
         ? stored.model
         : "";
+    const codexModelValue = isSelected
+      ? pickedModel
+      : stored.model != null && CODEX_NATIVE_MODELS.some((m) => m.id === stored.model)
+        ? stored.model
+        : "";
     const effortValue = isSelected
       ? pickedEffort
       : stored.effort != null && CLAUDE_NATIVE_EFFORTS.some((e) => e.value === stored.effort)
@@ -1430,13 +1435,40 @@ function AgentHarnessPicker({
       );
     }
     if (nativeAgentHasCapability(agent, "approvalMode")) {
-      // Codex offers the DANGEROUS full-bypass opt-in; OpenCode (same approval
-      // presets) does not. Arming bypass requires Codex to already be the
-      // selected agent — the screen's reset-on-agent-change effect clears it
-      // otherwise, which is the intended safety property.
+      // Codex offers model selection and the DANGEROUS full-bypass opt-in;
+      // OpenCode (same approval presets) does not. Arming bypass requires
+      // Codex to already be the selected agent — the screen's
+      // reset-on-agent-change effect clears it otherwise, which is the
+      // intended safety property.
       const isCodex = entryHarness === "codex-native";
       return (
         <>
+          {isCodex && (
+            <>
+              <PickerSectionHeader>Model</PickerSectionHeader>
+              <DropdownMenuRadioGroup
+                value={codexModelValue}
+                onValueChange={(m) => {
+                  onSelectAgent(agent);
+                  if (entryHarness) writeHarnessOption(entryHarness, { model: m });
+                  setPickedModel(m);
+                }}
+              >
+                {CODEX_NATIVE_MODELS.map((m) => (
+                  <DropdownMenuRadioItem
+                    key={m.id}
+                    value={m.id}
+                    data-testid={`new-chat-landing-codex-model-${m.id}`}
+                    onSelect={(event) => event.preventDefault()}
+                    className="rounded-sm py-1 pl-2 text-xs"
+                  >
+                    {m.label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+            </>
+          )}
           <ApprovalModeOptions
             value={modeValue(
               CODEX_NATIVE_APPROVAL_MODES,
@@ -2688,11 +2720,14 @@ export function NewChatLandingScreen() {
                     ? (CURSOR_NATIVE_EXEC_MODES.find((m) => m.value === cursorExecMode)?.args ?? [])
                     : undefined,
             // Model + reasoning effort, persisted on the session row before
-            // the runner launches. Only claude-native surfaces the picker, so
-            // only its agents carry the choice; the runner reads them as
-            // `--model` / `--effort` at terminal launch. An unselected ("")
-            // knob is omitted so Claude Code keeps its own configured model.
-            model_override: agentSupportsPermissionMode && pickedModel ? pickedModel : undefined,
+            // the runner launches. claude-native and codex-native both surface
+            // the model picker; the runner applies it as `--model` at terminal
+            // launch. An unselected ("") knob is omitted so the harness keeps
+            // its own configured model. Effort is claude-native only.
+            model_override:
+              (agentSupportsPermissionMode || agentSupportsApprovalMode) && pickedModel
+                ? pickedModel
+                : undefined,
             reasoning_effort:
               agentSupportsPermissionMode && pickedEffort ? pickedEffort : undefined,
             // Smart routing toggle — server-side, available for any agent.
