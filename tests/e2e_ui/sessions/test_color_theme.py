@@ -199,3 +199,26 @@ def test_guided_custom_theme_applies_to_both_modes_and_persists(
     assert surface_background == "rgba(0, 0, 0, 0)", (
         "workspace content should not cover the translucent rail"
     )
+
+
+def test_custom_theme_colors_can_be_randomized(
+    page: Page, seeded_session: tuple[str, str]
+) -> None:
+    """Randomizing accent and tint updates the picker and persisted theme."""
+    base_url, _session_id = seeded_session
+    _open_appearance(page, base_url)
+    page.evaluate("Math.random = () => 0.5")
+
+    for test_id in ["custom-theme-accent", "custom-theme-tint"]:
+        page.get_by_test_id(f"{test_id}-trigger").click()
+        page.get_by_test_id(f"{test_id}-randomize").click()
+        expect(page.get_by_test_id(f"{test_id}-input")).to_have_value("#3AD2D2")
+        page.keyboard.press("Escape")
+
+    expect(_color_theme_select(page)).to_contain_text("Custom")
+    assert _data_theme(page) == "custom"
+    assert _stored_palette(page) == '"custom"'
+    stored = _stored_custom_theme(page)
+    assert stored is not None
+    assert stored["accent"] == "#3ad2d2"
+    assert stored["tint"] == "#3ad2d2"
