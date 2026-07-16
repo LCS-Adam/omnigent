@@ -10221,8 +10221,8 @@ def _prompt_install_cursor() -> str | None:
     return None
 
 
-def _manage_cursor_harness() -> None:
-    """Run the level-2 loop for Cursor: manage its ``CURSOR_API_KEY``.
+def _manage_cursor_sdk_harness() -> None:
+    """Run the Cursor SDK loop: manage its ``CURSOR_API_KEY``.
 
     Cursor runs via the ``cursor-sdk`` package and authenticates against
     Cursor's own backend with a ``CURSOR_API_KEY`` — the SDK requires one (a
@@ -10337,6 +10337,84 @@ def _set_cursor_api_key() -> str | None:
     secret_store.store_secret(CURSOR_SECRET_NAME, pasted)
     _save_global_config(cursor_api_key_settings(f"keychain:{CURSOR_SECRET_NAME}"))
     return "✓ Cursor API key stored"
+
+
+def _manage_cursor_native_harness() -> None:
+    """Configure the ``cursor-agent`` CLI used by the built-in web agent."""
+    from omnigent.onboarding.harness_install import (
+        CURSOR_KEY,
+        harness_cli_installed,
+        harness_cli_logged_in,
+        harness_install_spec,
+        harness_login,
+        harness_logout,
+    )
+    from omnigent.onboarding.interactive import console, select
+
+    if not harness_cli_installed(CURSOR_KEY):
+        spec = harness_install_spec(CURSOR_KEY)
+        hint = (
+            spec.install_hint
+            if spec and spec.install_hint
+            else "curl https://cursor.com/install -fsS | bash"
+        )
+        console.print(
+            "  Cursor CLI isn't installed. Install it with:\n"
+            f"    [bold]{hint}[/bold]\n"
+            "  then run [bold]cursor-agent login[/bold] or re-open this menu."
+        )
+        return
+
+    status: str | None = None
+    while True:
+        logged_in = harness_cli_logged_in(CURSOR_KEY)
+        header = "Cursor CLI — logged in" if logged_in else "Cursor CLI — not logged in yet"
+        rows = [_HarnessMenuRow("Sign in (cursor-agent login)", action="login")]
+        if logged_in:
+            rows.append(_HarnessMenuRow("Sign out (cursor-agent logout)", action="logout"))
+        rows.append(_HarnessMenuRow("← Back", action="back"))
+        idx = select(header, [row.label for row in rows], clear_on_exit=True, status=status)
+        if idx < 0 or rows[idx].action == "back":
+            return
+        if rows[idx].action == "login":
+            status = (
+                "✓ Cursor CLI logged in" if harness_login(CURSOR_KEY) else "Login not detected"
+            )
+        elif rows[idx].action == "logout":
+            status = "✓ Cursor CLI logged out" if harness_logout(CURSOR_KEY) else "Logout failed"
+
+
+def _manage_cursor_harness() -> None:
+    """Configure Cursor CLI and SDK from one consolidated setup entry."""
+    from omnigent.onboarding.cursor_auth import cursor_api_key_configured
+    from omnigent.onboarding.harness_install import (
+        CURSOR_KEY,
+        harness_cli_installed,
+        harness_cli_logged_in,
+    )
+    from omnigent.onboarding.interactive import select
+
+    while True:
+        cli_status = (
+            "logged in"
+            if harness_cli_logged_in(CURSOR_KEY)
+            else "needs login"
+            if harness_cli_installed(CURSOR_KEY)
+            else "not installed"
+        )
+        sdk_status = "API key configured" if cursor_api_key_configured() else "not configured"
+        rows = [
+            _HarnessMenuRow(f"Cursor CLI — {cli_status}", action="cli"),
+            _HarnessMenuRow(f"Cursor SDK — {sdk_status}", action="sdk"),
+            _HarnessMenuRow("← Back", action="back"),
+        ]
+        idx = select("Cursor setup", [row.label for row in rows], clear_on_exit=True)
+        if idx < 0 or rows[idx].action == "back":
+            return
+        if rows[idx].action == "cli":
+            _manage_cursor_native_harness()
+        elif rows[idx].action == "sdk":
+            _manage_cursor_sdk_harness()
 
 
 def _prompt_install_antigravity() -> str | None:
@@ -11814,11 +11892,7 @@ def _run_configure_harnesses_interactive() -> None:
         copilot_github_token_configured,
         copilot_sdk_installed,
     )
-    from omnigent.onboarding.cursor_auth import (
-        CURSOR_EXTRA,
-        cursor_api_key_configured,
-        cursor_sdk_installed,
-    )
+    from omnigent.onboarding.cursor_auth import cursor_api_key_configured
     from omnigent.onboarding.extra_install import extra_install_display
     from omnigent.onboarding.goose_auth import goose_config_summary
     from omnigent.onboarding.harness_install import (
@@ -11831,6 +11905,7 @@ def _run_configure_harnesses_interactive() -> None:
         OPENCODE_KEY,
         QWEN_KEY,
         harness_cli_installed,
+        harness_cli_logged_in,
         harness_install_command,
         harness_install_spec,
     )
@@ -11965,29 +12040,45 @@ def _run_configure_harnesses_interactive() -> None:
         rows.append(_family_row(ANTHROPIC_FAMILY))
         rows.append(_family_row(OPENAI_FAMILY))
 
-        # Cursor — readiness is the CURSOR_API_KEY (the cursor-sdk extra is a
-        # soft dependency; the key is independently storable, so a missing SDK
-        # is surfaced as the install hint, not a hard block).
-        if cursor_api_key_configured(config) or bool(os.environ.get("CURSOR_API_KEY")):
-            rows.append((CURSOR_KEY, "Cursor", "API key", "ready", ""))
-        elif not cursor_sdk_installed():
+        # Cursor setup covers both surfaces, but readiness prioritizes the CLI
+        # used by the built-in web agent. An SDK key never hides a CLI problem.
+        cursor_sdk_ready = cursor_api_key_configured(config) or bool(
+            os.environ.get("CURSOR_API_KEY")
+        )
+        if not harness_cli_installed(CURSOR_KEY):
+            cursor_spec = harness_install_spec(CURSOR_KEY)
+            cursor_hint = (
+                cursor_spec.install_hint
+                if cursor_spec and cursor_spec.install_hint
+                else "curl https://cursor.com/install -fsS | bash"
+            )
             rows.append(
                 (
                     CURSOR_KEY,
                     "Cursor",
-                    "Not installed",
+                    "CLI not installed · SDK ready" if cursor_sdk_ready else "CLI not installed",
                     "missing",
-                    _install_hint(extra_install_display(CURSOR_EXTRA)),
+                    _install_hint(cursor_hint),
                 ),
+            )
+        elif harness_cli_logged_in(CURSOR_KEY):
+            rows.append(
+                (
+                    CURSOR_KEY,
+                    "Cursor",
+                    "CLI + SDK ready" if cursor_sdk_ready else "CLI ready",
+                    "ready",
+                    "",
+                )
             )
         else:
             rows.append(
                 (
                     CURSOR_KEY,
                     "Cursor",
-                    "Not configured",
+                    "CLI needs login · SDK ready" if cursor_sdk_ready else "CLI needs login",
                     "warn",
-                    "Open to add the Cursor API key.",
+                    "Open to run `cursor-agent login`.",
                 ),
             )
 
