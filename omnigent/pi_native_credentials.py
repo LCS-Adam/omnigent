@@ -915,4 +915,12 @@ def pi_native_provider_launch(
             model_provider_id = extra_id
             break
     args = ["--provider", model_provider_id, "--model", provider.model]
+    # For non-Claude models on openai-completions/responses, disable thinking.
+    # Gemini and other Databricks models return reasoning_tokens in their
+    # responses; Pi's TUI mode applies thinking even with defaultThinkingLevel:null
+    # in settings, causing the agent loop to complete without surfacing the text
+    # content to the extension. Explicitly passing --thinking off ensures the
+    # completions handler doesn't activate the thinking path.
+    if model_provider_id != provider.provider_id:
+        args.extend(["--thinking", "off"])
     return env, args
