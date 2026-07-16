@@ -887,6 +887,17 @@ def pi_native_provider_launch(
         append to the Pi command.
     """
     write_pi_models_config(agent_dir, provider)
+    # Copy the user's global Pi settings but suppress defaultThinkingLevel.
+    # In TUI mode Pi applies the setting from ~/.pi/agent/settings.json; for
+    # non-Claude models via openai-completions, any thinking level causes the
+    # Databricks gateway to return 400 (reasoning_effort is sent even when
+    # supportsReasoningEffort is false in the compat block, because TUI mode
+    # applies the session-level thinking before the compat check fires).
+    # Passing None in the overlay makes _deep_merge_settings write null for the
+    # key; Pi's getDefaultThinkingLevel() returns null (falsy) → no thinking.
+    from omnigent.inner.pi_settings import prepare_managed_pi_agent_dir
+
+    prepare_managed_pi_agent_dir(agent_dir, overlay={"defaultThinkingLevel": None})
     env = {PI_CODING_AGENT_DIR_ENV_VAR: str(agent_dir)}
     # Resolve which provider the selected model lives in. Non-Claude models
     # (GLM, GPT, Llama…) are in additional_providers (omnigent-openai);
