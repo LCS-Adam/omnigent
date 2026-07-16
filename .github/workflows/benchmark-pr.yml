@@ -35,7 +35,7 @@ jobs:
     name: Benchmark regression check (sqlite)
     if: github.repository == 'omnigent-ai/omnigent' && !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
 
     steps:
       - name: Check out repo
@@ -56,11 +56,30 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev --extra databricks
 
+      # Use the same corpus size as the nightly so baseline numbers are
+      # directly comparable. Cache the seeded DB on the schema head + seed
+      # script hash to avoid re-seeding on every push (same contract as
+      # benchmark.yml).
+      - name: Resolve seed cache key
+        id: seedkey
+        run: |
+          HEAD="$(uv run --no-sync dev/benchmarks/omnigent/seed.py --print-head)"
+          echo "key=benchdb-sqlite-${HEAD}-5000x200-${{ hashFiles('dev/benchmarks/omnigent/seed.py') }}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Restore seeded SQLite corpus
+        id: seedcache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v4
+        with:
+          path: bench.db
+          key: ${{ steps.seedkey.outputs.key }}
+
       - name: Seed SQLite corpus
+        if: steps.seedcache.outputs.cache-hit != 'true'
         run: |
           uv run --no-sync dev/benchmarks/omnigent/seed.py \
             --database-uri "sqlite:///bench.db" \
-            --sessions 500 --items-per-session 50
+            --sessions 5000 --items-per-session 200
 
       - name: Run benchmark (candidate)
         run: |
