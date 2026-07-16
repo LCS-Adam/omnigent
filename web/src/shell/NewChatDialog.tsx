@@ -2613,15 +2613,17 @@ export function NewChatLandingScreen() {
     if (mentionFsQuery.isPlaceholderData) return [];
     const rows = (mentionFsQuery.data?.entries ?? [])
       .filter((e) => e.type === "directory" || e.type === "file")
-      .map((e): WorkspaceFile => ({
-        path: e.path.startsWith(workspaceRoot)
-          ? e.path.slice(workspaceRoot.length).replace(/^\/+/, "")
-          : e.name,
-        name: e.name,
-        type: e.type === "directory" ? "directory" : "file",
-        bytes: e.bytes,
-        modified_at: e.modified_at,
-      }));
+      .map(
+        (e): WorkspaceFile => ({
+          path: e.path.startsWith(workspaceRoot)
+            ? e.path.slice(workspaceRoot.length).replace(/^\/+/, "")
+            : e.name,
+          name: e.name,
+          type: e.type === "directory" ? "directory" : "file",
+          bytes: e.bytes,
+          modified_at: e.modified_at,
+        }),
+      );
     return rankMentionEntries(rows, mentionFilter);
   }, [
     mentionEnabled,
