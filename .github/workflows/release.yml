@@ -359,7 +359,7 @@ jobs:
             echo ""
             cat comparison.md 2>/dev/null || echo "_No comparison report generated._"
             echo ""
-            echo "_Candidate vs ${{ steps.prev.outputs.tag }} · 50 iterations × 2 runs · SQLite · threshold 100%_"
+            echo "_Candidate vs ${{ steps.prev.outputs.tag }} · 100 iterations × 3 runs · SQLite · threshold 100% on P50/P95_"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark artifacts

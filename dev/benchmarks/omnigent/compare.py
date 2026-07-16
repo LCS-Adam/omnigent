@@ -58,7 +58,7 @@ def compare_reports(
 
         c_summary = c_data.get("summary", {})
         c_p50 = c_summary.get("avg_p50_ms")
-        c_p99 = c_summary.get("avg_p99_ms")
+        c_p95 = c_summary.get("avg_p95_ms")
 
         if name not in baseline_journeys:
             rows.append(
@@ -67,10 +67,10 @@ def compare_reports(
                     "status": "new",
                     "b_p50": None,
                     "c_p50": c_p50,
-                    "b_p99": None,
-                    "c_p99": c_p99,
+                    "b_p95": None,
+                    "c_p95": c_p95,
                     "delta_p50": None,
-                    "delta_p99": None,
+                    "delta_p95": None,
                 }
             )
             continue
@@ -84,24 +84,24 @@ def compare_reports(
                     "status": "new",
                     "b_p50": None,
                     "c_p50": c_p50,
-                    "b_p99": None,
-                    "c_p99": c_p99,
+                    "b_p95": None,
+                    "c_p95": c_p95,
                     "delta_p50": None,
-                    "delta_p99": None,
+                    "delta_p95": None,
                 }
             )
             continue
 
         b_summary = b_data.get("summary", {})
         b_p50 = b_summary.get("avg_p50_ms", 0.0)
-        b_p99 = b_summary.get("avg_p99_ms", 0.0)
+        b_p95 = b_summary.get("avg_p95_ms", 0.0)
 
         c_p50 = c_p50 or 0.0
-        c_p99 = c_p99 or 0.0
+        c_p95 = c_p95 or 0.0
         delta_p50 = (c_p50 - b_p50) / b_p50 if b_p50 > 0 else 0.0
-        delta_p99 = (c_p99 - b_p99) / b_p99 if b_p99 > 0 else 0.0
+        delta_p95 = (c_p95 - b_p95) / b_p95 if b_p95 > 0 else 0.0
 
-        regression = delta_p50 > threshold or delta_p99 > threshold
+        regression = delta_p50 > threshold or delta_p95 > threshold
         if regression:
             passed = False
 
@@ -112,9 +112,9 @@ def compare_reports(
                 "b_p50": b_p50,
                 "c_p50": c_p50,
                 "delta_p50": delta_p50,
-                "b_p99": b_p99,
-                "c_p99": c_p99,
-                "delta_p99": delta_p99,
+                "b_p95": b_p95,
+                "c_p95": c_p95,
+                "delta_p95": delta_p95,
             }
         )
 
@@ -140,20 +140,20 @@ def print_table(rows: list[dict], threshold: float) -> None:
     table.add_column("Base P50 ms", justify="right")
     table.add_column("Cand P50 ms", justify="right")
     table.add_column("Δ P50", justify="right")
-    table.add_column("Base P99 ms", justify="right")
-    table.add_column("Cand P99 ms", justify="right")
-    table.add_column("Δ P99", justify="right")
+    table.add_column("Base P95 ms", justify="right")
+    table.add_column("Cand P95 ms", justify="right")
+    table.add_column("Δ P95", justify="right")
 
     for row in rows:
         style = _status_style(row["status"])
         delta_p50_str = _fmt_delta(row["delta_p50"])
-        delta_p99_str = _fmt_delta(row["delta_p99"])
+        delta_p95_str = _fmt_delta(row["delta_p95"])
 
         if row["status"] == "regression":
             if row["delta_p50"] is not None and row["delta_p50"] > threshold:
                 delta_p50_str = f"[red]{delta_p50_str}[/red]"
-            if row["delta_p99"] is not None and row["delta_p99"] > threshold:
-                delta_p99_str = f"[red]{delta_p99_str}[/red]"
+            if row["delta_p95"] is not None and row["delta_p95"] > threshold:
+                delta_p95_str = f"[red]{delta_p95_str}[/red]"
 
         table.add_row(
             row["journey"],
@@ -161,9 +161,9 @@ def print_table(rows: list[dict], threshold: float) -> None:
             _fmt_ms(row["b_p50"]),
             _fmt_ms(row["c_p50"]),
             delta_p50_str,
-            _fmt_ms(row["b_p99"]),
-            _fmt_ms(row["c_p99"]),
-            delta_p99_str,
+            _fmt_ms(row["b_p95"]),
+            _fmt_ms(row["c_p95"]),
+            delta_p95_str,
         )
 
     console.print()
@@ -176,10 +176,10 @@ def build_markdown(rows: list[dict], threshold: float, passed: bool) -> str:
     lines = [
         "## Benchmark comparison",
         "",
-        f"Regression threshold: **{threshold * 100:.0f}%** on avg P50 or avg P99.",
+        f"Regression threshold: **{threshold * 100:.0f}%** on avg P50 or avg P95.",
         "",
         "| Journey | Status | Base P50 ms | Cand P50 ms | Δ P50"
-        " | Base P99 ms | Cand P99 ms | Δ P99 |",
+        " | Base P95 ms | Cand P95 ms | Δ P95 |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
 
@@ -189,13 +189,13 @@ def build_markdown(rows: list[dict], threshold: float, passed: bool) -> str:
         b_p50 = _fmt_ms(row["b_p50"])
         c_p50 = _fmt_ms(row["c_p50"])
         d_p50 = _fmt_delta(row["delta_p50"])
-        b_p99 = _fmt_ms(row["b_p99"])
-        c_p99 = _fmt_ms(row["c_p99"])
-        d_p99 = _fmt_delta(row["delta_p99"])
+        b_p95 = _fmt_ms(row["b_p95"])
+        c_p95 = _fmt_ms(row["c_p95"])
+        d_p95 = _fmt_delta(row["delta_p95"])
         lines.append(
             f"| {row['journey']} | {emoji} {status} "
             f"| {b_p50} | {c_p50} | {d_p50} "
-            f"| {b_p99} | {c_p99} | {d_p99} |"
+            f"| {b_p95} | {c_p95} | {d_p95} |"
         )
 
     lines.append("")
@@ -217,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
         "--threshold",
         type=float,
         default=1.0,
-        help="Regression threshold as a fraction (default 1.0 = 100%%)",
+        help="Regression threshold as a fraction (default 1.0 = 100%%, checks P50 and P95)",
     )
     parser.add_argument(
         "--output-markdown",
