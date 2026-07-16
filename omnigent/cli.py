@@ -5960,9 +5960,17 @@ def resume(
 @click.option(
     "--session",
     "source_session_id",
-    required=True,
+    default=None,
     metavar="SESSION_ID",
-    help="Harness-native session ID to import.",
+    help="Harness-native session ID to import. Mutually exclusive with --last.",
+)
+@click.option(
+    "--last",
+    "recent_session_count",
+    type=click.IntRange(min=1, max=50),
+    default=None,
+    metavar="N",
+    help="Import the N most recently modified parent sessions (maximum 50).",
 )
 @click.option(
     "--server",
@@ -5974,18 +5982,21 @@ def resume(
 )
 def import_session_command(
     harness: str,
-    source_session_id: str,
+    source_session_id: str | None,
+    recent_session_count: int | None,
     server: str | None,
 ) -> None:
-    """Import one local Claude Code or Codex chat.
+    """Import local Claude Code or Codex chats.
 
     The source transcript is converted to ordinary Omnigent items and stored
-    as a normal session. A source session can only be imported once.
+    as a normal session. Use --session for one chat or --last for a bounded
+    batch. A source session can only be imported once.
 
     \b
     Examples:
       omnigent import --harness claude --session <session-id>
       omnigent import --harness codex --session <session-id>
+      omnigent import --harness claude --last 10
     """
     import httpx
 
@@ -5994,54 +6005,117 @@ def import_session_command(
         ImportSource,
         SessionImportNotFoundError,
     )
-    from omnigent.session_import.local import load_local_session
+    from omnigent.session_import.local import (
+        list_recent_local_session_ids,
+        load_local_session,
+    )
 
-    try:
-        imported = load_local_session(cast(ImportSource, harness.lower()), source_session_id)
-    except SessionImportNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
+    if (source_session_id is None) == (recent_session_count is None):
+        raise click.UsageError("Provide exactly one of --session or --last.")
+
+    source = cast(ImportSource, harness.lower())
+    is_batch = recent_session_count is not None
+    if recent_session_count is not None:
+        recent_ids = list_recent_local_session_ids(source, limit=recent_session_count)
+        if not recent_ids:
+            raise click.ClickException(f"No local {source} parent sessions were found")
+        source_session_ids = tuple(reversed(recent_ids))
+    else:
+        assert source_session_id is not None
+        source_session_ids = (source_session_id,)
 
     cfg = _load_effective_config()
     base_url = _resolve_attach_server(server, cfg.get("server"))
     if base_url is None:
         base_url = ensure_local_omnigent_server().url
     base_url = base_url.rstrip("/")
-    payload = {
-        "source": imported.source,
-        "external_session_id": imported.external_session_id,
-        "workspace": imported.workspace,
-        "items": [
-            {
-                "type": item.type,
-                "response_id": item.response_id,
-                "data": item.data.model_dump(mode="json", exclude_none=True),
-            }
-            for item in imported.items
-        ],
-    }
-    try:
-        response = httpx.post(
-            f"{base_url}/v1/imports",
-            json=payload,
-            headers=_remote_headers(server_url=base_url),
-            timeout=120.0,
-        )
-    except httpx.RequestError as exc:
-        raise click.ClickException(f"Could not reach the Omnigent server: {exc}") from exc
-    if response.is_error:
+    imported_count = 0
+    already_imported_count = 0
+    failed_count = 0
+    for current_source_session_id in source_session_ids:
         try:
-            body = response.json()
-            detail = body.get("error", {}).get("message") or body.get("detail")
-        except (ValueError, AttributeError):
-            detail = None
-        raise click.ClickException(
-            f"Import failed ({response.status_code}): {detail or response.text}"
-        )
+            imported = load_local_session(source, current_source_session_id)
+        except SessionImportNotFoundError as exc:
+            if not is_batch:
+                raise click.ClickException(str(exc)) from exc
+            failed_count += 1
+            click.echo(f"Failed {current_source_session_id}: {exc}", err=True)
+            continue
+        except (OSError, TypeError, ValueError) as exc:
+            if not is_batch:
+                raise
+            failed_count += 1
+            click.echo(f"Failed {current_source_session_id}: {exc}", err=True)
+            continue
 
-    result = response.json()
-    session_id = result["session_id"]
-    item_count = result["item_count"]
-    click.echo(f"Imported {item_count} item(s) into {session_id}.")
+        payload = {
+            "source": imported.source,
+            "external_session_id": imported.external_session_id,
+            "workspace": imported.workspace,
+            "items": [
+                {
+                    "type": item.type,
+                    "response_id": item.response_id,
+                    "data": item.data.model_dump(mode="json", exclude_none=True),
+                }
+                for item in imported.items
+            ],
+        }
+        try:
+            response = httpx.post(
+                f"{base_url}/v1/imports",
+                json=payload,
+                headers=_remote_headers(server_url=base_url),
+                timeout=120.0,
+            )
+        except httpx.RequestError as exc:
+            raise click.ClickException(f"Could not reach the Omnigent server: {exc}") from exc
+
+        if response.status_code == 409 and is_batch:
+            already_imported_count += 1
+            click.echo(f"Already imported {current_source_session_id}; skipped.")
+            continue
+        if response.is_error:
+            try:
+                body = response.json()
+                detail = body.get("error", {}).get("message") or body.get("detail")
+            except (ValueError, AttributeError):
+                detail = None
+            message = f"Import failed ({response.status_code}): {detail or response.text}"
+            if not is_batch:
+                raise click.ClickException(message)
+            failed_count += 1
+            click.echo(f"Failed {current_source_session_id}: {message}", err=True)
+            continue
+
+        try:
+            result = response.json()
+            session_id = result["session_id"]
+            item_count = result["item_count"]
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            if not is_batch:
+                raise click.ClickException("Import returned an invalid server response") from exc
+            failed_count += 1
+            click.echo(
+                f"Failed {current_source_session_id}: import returned an invalid server response",
+                err=True,
+            )
+            continue
+        imported_count += 1
+        if is_batch:
+            click.echo(
+                f"Imported {item_count} item(s) from {current_source_session_id} "
+                f"into {session_id}."
+            )
+        else:
+            click.echo(f"Imported {item_count} item(s) into {session_id}.")
+
+    if is_batch:
+        click.echo(f"\nImported: {imported_count}")
+        click.echo(f"Already imported: {already_imported_count}")
+        click.echo(f"Failed: {failed_count}")
+        if failed_count:
+            raise click.ClickException(f"{failed_count} session(s) failed to import")
 
 
 @cli.group("session", invoke_without_command=True)
