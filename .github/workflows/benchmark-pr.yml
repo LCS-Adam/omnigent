@@ -66,8 +66,8 @@ jobs:
         run: |
           uv run --no-sync dev/benchmarks/omnigent/run.py \
             --database-uri "sqlite:///bench.db" \
-            --iterations 20 \
-            --runs 2 \
+            --iterations 100 \
+            --runs 3 \
             --output candidate.json
 
       - name: Download latest nightly baseline (sqlite)
