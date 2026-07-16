@@ -3022,7 +3022,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "omnigent-client", editable = "sdks/python-client" },
     { name = "omnigent-ui-sdk", editable = "sdks/ui" },
-    { name = "openai", specifier = ">=1.0,<3" },
+    { name = "openai", specifier = ">=1.0,<2.45" },
     { name = "openai-agents", specifier = ">=0.0.17" },
     { name = "openai-agents", marker = "extra == 'agents-sdk'", specifier = ">=0.1,<1" },
     { name = "openshell", marker = "extra == 'openshell'", specifier = ">=0.0.7,<1" },
