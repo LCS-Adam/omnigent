@@ -178,8 +178,8 @@ def build_markdown(rows: list[dict], threshold: float, passed: bool) -> str:
         "",
         f"Regression threshold: **{threshold * 100:.0f}%** on avg P50 or avg P99.",
         "",
-        "| Journey | Status | Base P50 ms | Cand P50 ms | Δ P50 |"
-        " Base P99 ms | Cand P99 ms | Δ P99 |",
+        "| Journey | Status | Base P50 ms | Cand P50 ms | Δ P50"
+        " | Base P99 ms | Cand P99 ms | Δ P99 |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
 
