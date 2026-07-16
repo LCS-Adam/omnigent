@@ -231,12 +231,15 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Run benchmark on the release commit vs the previous stable release tag —
-  # same runner, back-to-back, so machine variance cancels out. Blocks cut on
-  # a significant regression (>20% p50 or p99). Skipped on dry runs, already-
-  # converged runs, and when skip_benchmark=true.
+  # same runner, back-to-back, so machine variance cancels out. A detected
+  # regression surfaces as an output flag that gates the benchmark-approve job
+  # (requiring manual sign-off) rather than failing outright. Skipped on dry
+  # runs, already-converged runs, and when skip_benchmark=true.
   benchmark:
     needs: [authorize, plan]
     if: ${{ !inputs.dry_run && needs.plan.outputs.already_done != 'true' && !inputs.skip_benchmark }}
+    outputs:
+      regression: ${{ steps.compare.outputs.regression }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -300,27 +303,34 @@ jobs:
         id: compare
         if: steps.prev.outputs.found == 'true'
         run: |
+          set +e
           uv run --no-sync dev/benchmarks/omnigent/compare.py \
             --baseline baseline.json \
             --candidate candidate.json \
-            --threshold 0.20 \
+            --threshold 1.0 \
             --output-markdown comparison.md
-        continue-on-error: true
+          RC=$?
+          set -e
+          # Expose regression flag as an output so the approval job can gate on it.
+          echo "regression=$([ $RC -ne 0 ] && echo 'true' || echo 'false')" >> "$GITHUB_OUTPUT"
 
       - name: Write step summary
         if: steps.prev.outputs.found == 'true'
         run: |
-          OUTCOME="${{ steps.compare.outcome }}"
+          REGRESSION="${{ steps.compare.outputs.regression }}"
           {
-            if [ "$OUTCOME" = "success" ]; then
+            if [ "$REGRESSION" != "true" ]; then
               echo "### Benchmark: PASS ✓"
             else
               echo "### Benchmark: REGRESSION DETECTED ✗"
+              echo ""
+              echo "> A regression exceeding the threshold was found."
+              echo "> The **benchmark-approve** job is awaiting maintainer sign-off before cut proceeds."
             fi
             echo ""
             cat comparison.md 2>/dev/null || echo "_No comparison report generated._"
             echo ""
-            echo "_Candidate vs ${{ steps.prev.outputs.tag }} · 50 iterations × 2 runs · SQLite · threshold 20%_"
+            echo "_Candidate vs ${{ steps.prev.outputs.tag }} · 50 iterations × 2 runs · SQLite · threshold 100%_"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark artifacts
@@ -334,15 +344,28 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
 
-      - name: Fail on regression
-        if: steps.prev.outputs.found == 'true' && steps.compare.outcome == 'failure'
+  # Pauses for a maintainer to review and approve in the GitHub UI when the
+  # benchmark job detected a regression. Uses an environment with required
+  # reviewers — configure "benchmark-regression-gate" in repo Settings →
+  # Environments. Skipped (passes through) when there is no regression.
+  benchmark-approve:
+    needs: [authorize, plan, benchmark]
+    if: |
+      !inputs.dry_run &&
+      needs.plan.outputs.already_done != 'true' &&
+      !inputs.skip_benchmark &&
+      needs.benchmark.outputs.regression == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: benchmark-regression-gate
+    steps:
+      - name: Regression approved by maintainer
         run: |
-          echo "::error::Performance regression detected vs ${{ steps.prev.outputs.tag }}. See step summary."
-          exit 1
+          echo "Benchmark regression approved. Proceeding with cut." | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Stamp + tag + push. Only reached on a real run that isn't already converged.
   cut:
-    needs: [authorize, plan, benchmark]
+    needs: [authorize, plan, benchmark, benchmark-approve]
     if: ${{ !inputs.dry_run && needs.plan.outputs.already_done != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15

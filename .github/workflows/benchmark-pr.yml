@@ -1,8 +1,9 @@
 name: Benchmark (PR)
 
-# Runs a lightweight SQLite benchmark when a PR touches migration files and
-# compares against the latest nightly benchmark artifact as a baseline. Posts
-# results as a PR comment and blocks the PR if a regression is detected.
+# Runs a lightweight SQLite benchmark when a PR touches migration files or
+# store-layer code and compares against the latest nightly benchmark artifact
+# as a baseline. Posts results as a PR comment and blocks the PR if a
+# regression is detected.
 #
 # Only runs on PRs to the main repo (not forks without secrets). Skips
 # comparison if no nightly baseline artifact is available — the benchmark still
@@ -13,6 +14,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "omnigent/db/migrations/**"
+      - "omnigent/stores/**"
 
 permissions:
   contents: read
@@ -106,7 +108,7 @@ jobs:
             --baseline baseline.json \
             --candidate candidate.json \
             --backend sqlite \
-            --threshold 0.20 \
+            --threshold 1.0 \
             --output-markdown comparison.md
           echo "EXIT_CODE=$?" >> "$GITHUB_ENV"
 

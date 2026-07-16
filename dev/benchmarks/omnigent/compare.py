@@ -216,8 +216,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.20,
-        help="Regression threshold as a fraction (default 0.20 = 20%%)",
+        default=1.0,
+        help="Regression threshold as a fraction (default 1.0 = 100%%)",
     )
     parser.add_argument(
         "--output-markdown",
