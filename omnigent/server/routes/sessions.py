@@ -1106,6 +1106,20 @@ def _announce_session_added(user_id: str | None, session_id: str) -> None:
     )
 
 
+def announce_hosts_changed(user_id: str | None) -> None:
+    """
+    Push a ``hosts_changed`` event to a user's session-updates streams.
+
+    Called when a host owned by ``user_id`` connects or disconnects so the
+    client invalidates its hosts cache without polling. A no-op when the user
+    has no stream connected.
+
+    :param user_id: Owner of the host that changed, or ``None`` in
+        single-user mode.
+    """
+    user_session_stream.publish(_discovery_key(user_id), {"type": "hosts_changed"})
+
+
 # Per-session todo cache updated by external_session_todos events from the
 # claude-native forwarder. Used by _build_session_response to populate the
 # ``todos`` snapshot field so the panel survives page refresh.
@@ -15499,32 +15513,45 @@ def create_sessions_router(
             like any normal watched row. Idle users with no new sessions
             receive nothing — so the zero-traffic property holds."""
             async for evt in user_session_stream.subscribe(_discovery_key(user_id)):
-                if not isinstance(evt, dict) or evt.get("type") != "session_added":
+                if not isinstance(evt, dict):
                     continue
-                sid = evt.get("session_id")
-                if not isinstance(sid, str):
-                    continue
-                async with emit_lock:
-                    # Already watched ⇒ the normal diff already covers it.
-                    if sid in watched:
+                evt_type = evt.get("type")
+                if evt_type == "session_added":
+                    sid = evt.get("session_id")
+                    if not isinstance(sid, str):
                         continue
-                    try:
-                        items = await _fetch_watched_items([sid], user_id)
-                        if items:
-                            await _send({"type": "changed", "items": items})
-                    except WebSocketDisconnect:
-                        # Client gone mid-send — propagate to tear the stream down.
-                        raise
-                    except Exception:  # noqa: BLE001 — a failed discovery push must not kill a live stream
-                        # A transient read/send failure for one announcement
-                        # must not drop the whole stream; the session is still
-                        # discoverable on the client's next list reconcile.
-                        _logger.warning(
-                            "session-updates discovery push failed for %r; "
-                            "falling back to list reconcile",
-                            sid,
-                            exc_info=True,
-                        )
+                    async with emit_lock:
+                        # Already watched ⇒ the normal diff already covers it.
+                        if sid in watched:
+                            continue
+                        try:
+                            items = await _fetch_watched_items([sid], user_id)
+                            if items:
+                                await _send({"type": "changed", "items": items})
+                        except WebSocketDisconnect:
+                            # Client gone mid-send — propagate to tear the stream down.
+                            raise
+                        except Exception:  # noqa: BLE001 — a failed discovery push must not kill a live stream
+                            # A transient read/send failure for one announcement
+                            # must not drop the whole stream; the session is still
+                            # discoverable on the client's next list reconcile.
+                            _logger.warning(
+                                "session-updates discovery push failed for %r; "
+                                "falling back to list reconcile",
+                                sid,
+                                exc_info=True,
+                            )
+                elif evt_type == "hosts_changed":
+                    async with emit_lock:
+                        try:
+                            await _send({"type": "hosts_changed"})
+                        except WebSocketDisconnect:
+                            raise
+                        except Exception:  # noqa: BLE001
+                            _logger.warning(
+                                "hosts-changed push failed; client will rely on fallback poll",
+                                exc_info=True,
+                            )
 
         reader_task = asyncio.create_task(_reader(), name="session-updates-reader")
         ticker_task = asyncio.create_task(_ticker(), name="session-updates-ticker")

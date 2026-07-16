@@ -66,8 +66,8 @@ def create_host_tunnel_router(
     host_store: HostStore,
     *,
     auth_provider: AuthProvider | None = None,
-    on_host_connect: Callable[[str], Awaitable[None]] | None = None,
-    on_host_disconnect: Callable[[str], Awaitable[None]] | None = None,
+    on_host_connect: Callable[[str, str | None], Awaitable[None]] | None = None,
+    on_host_disconnect: Callable[[str, str | None], Awaitable[None]] | None = None,
     on_runner_exited: Callable[[str, str], Awaitable[None]] | None = None,
     local_single_user: bool | None = None,
     runner_exit_reports: RunnerExitReports | None = None,
@@ -273,7 +273,7 @@ def create_host_tunnel_router(
             if on_host_connect is not None:
                 try:
                     await asyncio.wait_for(
-                        on_host_connect(host_id),
+                        on_host_connect(host_id, tunnel_owner),
                         timeout=30.0,
                     )
                 except asyncio.TimeoutError:
@@ -309,7 +309,7 @@ def create_host_tunnel_router(
                 await asyncio.to_thread(host_store.set_offline, host_id)
                 if on_host_disconnect is not None:
                     try:
-                        await on_host_disconnect(host_id)
+                        await on_host_disconnect(host_id, tunnel_owner)
                     except Exception:
                         _logger.exception(
                             "on_host_disconnect callback failed for %s",
@@ -328,7 +328,7 @@ def create_host_tunnel_router(
                 await asyncio.to_thread(host_store.set_offline, host_id)
                 if on_host_disconnect is not None:
                     try:
-                        await on_host_disconnect(host_id)
+                        await on_host_disconnect(host_id, tunnel_owner)
                     except Exception:
                         _logger.exception(
                             "on_host_disconnect callback failed for %s",

@@ -70,6 +70,7 @@ from omnigent.server.routes.session_mcp_servers import create_session_mcp_server
 from omnigent.server.routes.session_policies import create_session_policies_router
 from omnigent.server.routes.sessions import (
     SessionLiveness,
+    announce_hosts_changed,
     create_sessions_router,
     set_server_runner_router,
 )
@@ -2412,6 +2413,12 @@ def create_app(
         from omnigent.server.routes.host_tunnel import create_host_tunnel_router
         from omnigent.server.routes.hosts import create_hosts_router
 
+        async def _on_host_connect(_host_id: str, owner: str | None) -> None:
+            announce_hosts_changed(owner)
+
+        async def _on_host_disconnect(_host_id: str, owner: str | None) -> None:
+            announce_hosts_changed(owner)
+
         app.include_router(
             create_host_tunnel_router(
                 host_registry,
@@ -2419,6 +2426,8 @@ def create_app(
                 auth_provider=auth_provider,
                 runner_exit_reports=runner_exit_reports,
                 on_runner_exited=_on_runner_exited,
+                on_host_connect=_on_host_connect,
+                on_host_disconnect=_on_host_disconnect,
             ),
             prefix="/v1",
             tags=["hosts"],
