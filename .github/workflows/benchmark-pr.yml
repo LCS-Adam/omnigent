@@ -15,6 +15,7 @@ on:
     paths:
       - "omnigent/db/migrations/**"
       - "omnigent/stores/**"
+      - ".github/workflows/benchmark-pr.yml"
 
 permissions:
   contents: read
