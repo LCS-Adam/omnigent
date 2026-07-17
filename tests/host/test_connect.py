@@ -2312,6 +2312,64 @@ async def test_non_auth_permanent_4xx_omits_login_hint(
     assert "omnigent login" not in message
 
 
+@pytest.mark.parametrize("status", [401, 403])
+async def test_auth_errors_then_success_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """Auth errors within the retry budget followed by a successful connect.
+
+    Simulates the Databricks SDK refreshing its token on the second or
+    third attempt: the host should connect normally and not raise.
+
+    :param status: 401 or 403 — both retry up to _MAX_CONSECUTIVE_AUTH_ERRORS.
+    """
+
+    # One auth rejection, then a successful connect, then cancel.
+    spy = _ConnectSpy([_invalid_status(status), None, asyncio.CancelledError()])
+    _patch_connect(monkeypatch, spy)
+    host = _host()
+
+    # Should not raise HostConnectError — the auth error was recovered.
+    await host.run()
+
+    # The auth rejection + the successful connect + the cancel = 3 calls.
+    assert spy.call_count == 3
+    # Counter reset on successful upgrade — a subsequent auth error streak
+    # should still get _MAX_CONSECUTIVE_AUTH_ERRORS fresh retries.
+    assert host._consecutive_auth_errors == 0
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_non_auth_failure_resets_consecutive_auth_errors(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """A non-auth failure (5xx) resets _consecutive_auth_errors.
+
+    An auth rejection followed by an unrelated 5xx bounce should give
+    the next auth rejection a fresh budget, not carry over the prior
+    count — _consecutive_auth_errors tracks CONSECUTIVE auth failures.
+    """
+    from omnigent.host.connect import _MAX_CONSECUTIVE_AUTH_ERRORS
+
+    # Auth failure → non-auth failure → auth failure ... × _MAX → fatal.
+    # The non-auth failure in the middle must reset the counter so the
+    # second run of auth failures exhausts a fresh budget.
+    n = _MAX_CONSECUTIVE_AUTH_ERRORS
+    spy = _ConnectSpy(
+        [_invalid_status(status)]  # auth #1
+        + [_invalid_status(503)]  # non-auth resets counter
+        + [_invalid_status(status)] * n  # auth #1..n → fatal
+    )
+    _patch_connect(monkeypatch, spy)
+    host = _host()
+
+    with pytest.raises(HostConnectError):
+        await host.run()
+
+    # 1 auth + 1 non-auth + n auth = n+2 total calls.
+    assert spy.call_count == n + 2
+
+
 @pytest.mark.parametrize("status", [408, 429, 500, 503])
 async def test_run_reconnects_on_transient_upgrade_failure(
     monkeypatch: pytest.MonkeyPatch, status: int
