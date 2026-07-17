@@ -9384,7 +9384,6 @@ async def _forward_event_to_runner(
         # PRE-resolution form) and drops it by id, appending its own
         # resolved copy — id-based dedup, not a role/content guess.
         "persisted_item_id": persisted_items[0].id,
-        **({"created_by": created_by} if created_by else {}),
     }
     # Persist the turn-initiating human's identity on the conversation row
     # so any server replica can read it back when the runner calls
@@ -15063,6 +15062,7 @@ def create_sessions_router(
             raise HTTPException(status_code=422, detail=[_multipart_missing_detail("bundle")])
         parsed_metadata = _parse_session_create_metadata(metadata)
         _reject_reserved_cost_control_label_seed(parsed_metadata.labels)
+        _reject_server_reserved_label_seed(parsed_metadata.labels)
 
         inherited_runner_id: str | None = None
         if parsed_metadata.parent_session_id is not None:
