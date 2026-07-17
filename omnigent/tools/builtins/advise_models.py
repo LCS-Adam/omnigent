@@ -10,7 +10,7 @@ before the MCP proxy ever reaches the runner.
 The tool is registered by ``ToolManager`` when:
 - ``tools.agents`` is declared in the spec, AND
 - ``RuntimeCaps.routing_client`` is configured
-  (``OMNIGENT_SMART_ROUTING=1`` + ``llm:`` config block).
+  (a ``routing.endpoint`` in the server config).
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ class SysAdviseModelsTool(Tool):
             "for, plus an optional model list to constrain the pick. "
             "Returns one {agent, model, rationale} entry per agent entry. "
             "Use the returned model as args.model in sys_session_send. "
-            "Advisory only. Available when OMNIGENT_SMART_ROUTING=1."
+            "Advisory only. Available when a routing endpoint is configured."
         )
 
     def get_schema(self) -> dict[str, Any]:

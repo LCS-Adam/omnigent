@@ -55,6 +55,7 @@ from ._client import OmnigentClient
 from ._errors import OmnigentError, ToolCallDenied
 from ._events import MCP_ELICITATION_METHOD, ElicitationRequest
 from ._query import QueryResult, QueryStream
+from ._routing import RouteOption, RouteSelection, RoutingNamespace
 from ._server import LocalServer
 from ._session import Session
 from ._sessions import SessionsNamespace
@@ -100,6 +101,9 @@ __all__ = [
     "ResponseEndBlock",
     "ResponseStartBlock",
     "RetryBlock",
+    "RouteOption",
+    "RouteSelection",
+    "RoutingNamespace",
     "Session",
     "SessionToolCallInfo",
     "SessionsChat",

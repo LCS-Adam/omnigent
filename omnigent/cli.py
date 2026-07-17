@@ -3226,7 +3226,49 @@ def server(
     # OMNIGENT_SMART_ROUTING=1.  Hidden by default — managed deployments
     # override RuntimeCaps.routing_client with their own implementation.
     routing_client = None
-    if server_llm is not None and os.environ.get("OMNIGENT_SMART_ROUTING") == "1":
+    routing_cfg = cfg.get("routing") or {}
+    routing_endpoint = routing_cfg.get("endpoint")
+    if routing_endpoint:
+        # Resolve a bearer token from the server llm: connection/profile.
+        _routing_token = None
+        if server_llm is not None:
+            from omnigent.runtime.policies.builder import _resolve_server_llm_connection
+
+            _conn = _resolve_server_llm_connection(server_llm)
+            _routing_token = (_conn or {}).get("api_key")
+        from omnigent_client._routing import RouteOption as _RouteOption
+        from omnigent_client._routing import RoutingNamespace
+
+        from omnigent.server.smart_routing import RoutingResult
+
+        _router = routing_cfg.get("router", "task_v0")
+        _ns = RoutingNamespace(routing_endpoint, token=_routing_token)
+
+        class _RemoteRoutingClient:
+            async def route(
+                self,
+                message: str,
+                available_models: dict[str, list[str]],
+            ) -> RoutingResult | None:
+                options = [
+                    _RouteOption(model=m, harness=h)
+                    for h, models in available_models.items()
+                    for m in models
+                ]
+                try:
+                    sel = await _ns.select(message, options, router=_router)
+                except Exception:  # noqa: BLE001
+                    return None
+                if sel.route_option is None or not sel.route_option.model:
+                    return None
+                return RoutingResult(
+                    model=sel.route_option.model,
+                    rationale=sel.rationale,
+                    harness=sel.route_option.harness or None,
+                )
+
+        routing_client = _RemoteRoutingClient()
+    elif server_llm is not None and os.environ.get("OMNIGENT_SMART_ROUTING") == "1":
         from omnigent.runtime.policies.builder import (
             _build_policy_llm_client,
             _resolve_server_llm_connection,

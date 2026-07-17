@@ -12,6 +12,7 @@ from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
 from ._files import FilesNamespace
 from ._query import QueryResult, QueryStream
 from ._responses import ResponsesNamespace
+from ._routing import RoutingNamespace
 from ._session import Session
 from ._sessions import SessionsNamespace
 from ._sessions_chat import SessionsChat, ToolCallable
@@ -52,6 +53,13 @@ class OmnigentClient:
         request, allowing transparent token refresh for OAuth
         flows. ``None`` (default) relies on static ``headers``.
     :param timeout: Default timeout for HTTP requests in seconds.
+    :param routing_endpoint: Optional base URL for the ``routes:select``
+        routing endpoint, up to ``/v1`` (e.g.
+        ``"https://host/ai-gateway/routing/v1"``). When set,
+        ``client.routing`` is available.  ``None`` (default) leaves
+        ``client.routing`` as ``None``.
+    :param routing_token: Bearer token for the routing endpoint.
+        Only used when ``routing_endpoint`` is set.
     """
 
     def __init__(
@@ -67,6 +75,8 @@ class OmnigentClient:
         # (tool calls can legitimately hold the stream open for
         # minutes).
         timeout: float = 30.0,
+        routing_endpoint: str | None = None,
+        routing_token: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         # Long read timeout for SSE streams (tool execution can
@@ -95,6 +105,11 @@ class OmnigentClient:
         self.sessions = SessionsNamespace(self._http, self._base_url)
         self.files = FilesNamespace(self._http, self._base_url)
         self.responses = ResponsesNamespace(self._http, self._base_url)
+        self.routing: RoutingNamespace | None = (
+            RoutingNamespace(routing_endpoint, token=routing_token)
+            if routing_endpoint is not None
+            else None
+        )
 
     def session(
         self,
