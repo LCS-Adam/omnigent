@@ -554,7 +554,6 @@ async def test_evaluate_server_stashed_turn_actor_overrides_request_user_id(
     # forward time (normally set by _forward_event_to_runner).
     from omnigent.server.routes import sessions as sessions_mod
 
-    sessions_mod._session_turn_actor[session_id] = "blocked@test.com"
     monkeypatch.setitem(sessions_mod._session_turn_actor, session_id, "blocked@test.com")
 
     resp = await client.post(

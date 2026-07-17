@@ -1253,11 +1253,14 @@ _pending_policy_ask_writes: cachetools.LRUCache[str, _PendingPolicyAskWrites] = 
     cachetools.LRUCache(maxsize=512)
 )
 
-# conversation_id -> email of the human who initiated the current turn, set
-# server-side when the event is forwarded to the runner so the policy-evaluate
-# and MCP-proxy endpoints can gate on the human rather than the runner's
-# service-account credential without trusting anything from the request body.
-_session_turn_actor: dict[str, str | None] = {}
+# conversation_id -> email of the human who initiated the current turn.
+# Written server-side at _forward_event_to_runner time; read by the
+# policy-evaluate and MCP-proxy endpoints so per-user policies gate on
+# the correct actor rather than the runner's service-account credential.
+# Only updated when created_by is non-None — system-driven forwards
+# (sub-agent results, parent-wake) have no human sender and must not
+# stomp the stash mid-turn. LRU-bounded to cap per-process footprint.
+_session_turn_actor: cachetools.LRUCache[str, str] = cachetools.LRUCache(maxsize=1024)
 
 
 # (conversation_id, deciding_policy) -> lock serializing native ASK gates.
@@ -9389,7 +9392,11 @@ async def _forward_event_to_runner(
     # Stash the turn-initiating human's identity server-side so policy
     # evaluate and MCP proxy endpoints can gate on the correct actor
     # without trusting any field from the runner's request body.
-    _session_turn_actor[session_id] = created_by
+    # Only update on a real human sender — system-driven forwards
+    # (sub-agent results, parent-wake) carry created_by=None and must
+    # not overwrite the identity mid-turn.
+    if created_by is not None:
+        _session_turn_actor[session_id] = created_by
     # Forward request-supplied client-side tool schemas so non-native
     # harnesses can emit (and tunnel) the caller's tools — the runner
     # merges these into the harness tool list (_merge_request_client_tools).
