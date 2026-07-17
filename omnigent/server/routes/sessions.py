@@ -9378,6 +9378,7 @@ async def _forward_event_to_runner(
         # PRE-resolution form) and drops it by id, appending its own
         # resolved copy — id-based dedup, not a role/content guess.
         "persisted_item_id": persisted_items[0].id,
+        **({"created_by": created_by} if created_by else {}),
     }
     # Forward request-supplied client-side tool schemas so non-native
     # harnesses can emit (and tunnel) the caller's tools — the runner
@@ -17088,7 +17089,11 @@ def create_sessions_router(
             )
 
         engine = _build_engine()
-        ctx = _build_evaluation_context(phase, data, event, actor=_build_actor(user_id))
+        # Prefer actor supplied by the runner (carries the turn-initiating
+        # user's identity) over the HTTP request's service-account identity.
+        context_actor = (event.get("context") or {}).get("actor")
+        actor = context_actor if isinstance(context_actor, dict) else _build_actor(user_id)
+        ctx = _build_evaluation_context(phase, data, event, actor=actor)
         result = await engine.evaluate(ctx, read_only=is_read_only)
 
         # URL-based elicitation for blocking phases: on a TOOL_CALL or
@@ -21847,6 +21852,10 @@ def create_sessions_router(
             )
 
         if method == "tools/call":
+            # Prefer actor forwarded by the runner (the turn-initiating user's
+            # identity) over the HTTP request's service-account identity.
+            body_actor = body.get("actor")
+            mcp_actor = body_actor if isinstance(body_actor, dict) else _build_actor(user_id)
             return await _handle_mcp_tools_call(
                 rpc_id,
                 session_id,
@@ -21854,7 +21863,7 @@ def create_sessions_router(
                 conversation_store,
                 agent_store,
                 runner_router,
-                actor=_build_actor(user_id),
+                actor=mcp_actor,
                 request=request,
             )
 

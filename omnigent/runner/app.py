@@ -6437,6 +6437,7 @@ async def _evaluate_policy_via_omnigent(
     evaluation_id: str,
     phase: str,
     data: dict[str, Any],
+    turn_actor: str | None = None,
 ) -> None:
     """
     Proxy a policy evaluation request from the harness to the Omnigent server.
@@ -6489,12 +6490,16 @@ async def _evaluate_policy_via_omnigent(
     verdict_data: dict[str, Any] | None = None
 
     try:
+        context: dict[str, Any] = {}
+        if turn_actor:
+            context["actor"] = {"run_as": turn_actor}
         ap_resp = await server_client.post(
             f"/v1/sessions/{conversation_id}/policies/evaluate",
             json={
                 "event": {
                     "type": phase,
                     "data": data,
+                    **({"context": context} if context else {}),
                 },
             },
             # A TOOL_CALL/LLM_REQUEST/REQUEST ASK parks server-side in
@@ -7995,6 +8000,10 @@ def create_runner_app(
     _repl_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     # Turn sequencing (SESSION_REARCHITECTURE Step 5 / SESSION_STEERING_MIGRATION Step 1)
     _active_turns: dict[str, asyncio.Task[None] | None] = {}
+    # Turn-initiating user's identity per session, forwarded by the server in
+    # the message body's ``created_by`` field. Used to thread the human
+    # actor through to policy evaluate and MCP proxy calls.
+    _turn_actor: dict[str, str | None] = {}
     # Latest working status per session ("running"/"idle"/...), mirrored from
     # every session.status edge at the _publish_event chokepoint (so it covers the
     # PTY watcher's roles AND codex/antigravity/opencode, whose edges are published
@@ -9863,6 +9872,7 @@ def create_runner_app(
                 await turn_task
         _session_message_buffers.pop(session_id, None)
         _live_response_id.pop(session_id, None)
+        _turn_actor.pop(session_id, None)
         _native_pane_status.pop(session_id, None)
         _ingest_next_seq.pop(session_id, None)
         _ingest_now_serving.pop(session_id, None)
@@ -12919,6 +12929,7 @@ def create_runner_app(
         _active_turns.pop(conv_id, None)
         # Turn ended: clear the live marker so a concurrent forward is skipped.
         _live_response_id.pop(conv_id, None)
+        _turn_actor.pop(conv_id, None)
         # Mirror the clear onto the process manager's in-flight map so the
         # idle reaper can reap the (now genuinely idle) entry once its idle
         # window elapses. Reached on every terminal path, so a dropped or
@@ -13475,7 +13486,10 @@ def create_runner_app(
                 ``{"items": [...]}`` or ``{"error": "..."}``.
             """
             result_str = await ProxyMcpManager(
-                _captured_session_id, server_client, publish_event=_publish_event
+                _captured_session_id,
+                server_client,
+                publish_event=_publish_event,
+                turn_actor=_turn_actor.get(_captured_session_id),
             ).call_tool(None, name, arguments)
             try:
                 return _json.loads(result_str)
@@ -13621,6 +13635,12 @@ def create_runner_app(
         :param msg_body: The forwarded message body from the server.
         :param conv: Session/conversation identifier, e.g. ``"conv_abc123"``.
         """
+        # Track the turn-initiating user's identity for policy evaluate and
+        # MCP proxy calls so policies gate on the human, not the runner's
+        # service account.
+        if (fwd_created_by := msg_body.get("created_by")) is not None:
+            _turn_actor[conv] = fwd_created_by
+
         # In-place agent switch (POST /v1/sessions/{id}/switch-agent) rebinds
         # the session to a different agent mid-session. The server forwards the
         # NEW agent_id on the next turn; when it differs from the agent this
@@ -14057,6 +14077,7 @@ def create_runner_app(
             # marker here too or the next turn's forward gate goes stale.
             _active_turns.pop(session_id, None)
             _live_response_id.pop(session_id, None)
+            _turn_actor.pop(session_id, None)
             _publish_turn_status(session_id, "idle")
             raise
         except _ContextWindowOverflow:
@@ -14736,6 +14757,7 @@ def create_runner_app(
                                             conv_id,
                                             server_client,
                                             publish_event=_publish_event,
+                                            turn_actor=_turn_actor.get(conv_id),
                                         )
                                         _dispatch_tasks.append(
                                             _asyncio.create_task(
@@ -14788,6 +14810,7 @@ def create_runner_app(
                                                 evaluation_id=_eval_id,
                                                 phase=_eval_phase,
                                                 data=_eval_data,
+                                                turn_actor=_turn_actor.get(conv_id),
                                             )
                                         )
                                     )
