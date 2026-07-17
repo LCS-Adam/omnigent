@@ -17090,7 +17090,7 @@ def create_sessions_router(
         engine = _build_engine()
         _session_owner = conversation_store.get_session_owner(session_id)
         ctx = _build_evaluation_context(
-            phase, data, event, actor=_build_actor(_session_owner or user_id)
+            phase, data, event, actor=_build_actor(user_id or _session_owner)
         )
         result = await engine.evaluate(ctx, read_only=is_read_only)
 
@@ -21858,7 +21858,7 @@ def create_sessions_router(
                 conversation_store,
                 agent_store,
                 runner_router,
-                actor=_build_actor(_session_owner or user_id),
+                actor=_build_actor(user_id or _session_owner),
                 request=request,
             )
 
