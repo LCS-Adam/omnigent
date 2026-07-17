@@ -2569,26 +2569,6 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
     workspace_host = _databricks_workspace_login_target(server, probe)
     if workspace_host is None:
         return
-    # Before giving up, attempt a silent token refresh via the Databricks SDK.
-    # This handles the common case where the stored OIDC token in
-    # auth_tokens.json has expired but the Databricks OAuth grant is still
-    # valid — the SDK can mint a fresh bearer without user interaction.
-    fresh_token = _databricks_workspace_token(workspace_host)
-    if fresh_token is not None:
-        from omnigent.cli_auth import load_databricks_org_id
-
-        org_id = load_databricks_org_id(server)
-        retry = _httpx.get(
-            f"{server}/v1/me",
-            headers={"Authorization": f"Bearer {fresh_token}"},
-            params={"o": org_id} if org_id else None,
-            timeout=10.0,
-        )
-        if retry.status_code == 200:
-            # SDK refreshed the token successfully — the tunnel and session
-            # API calls will pick it up via _build_auth_headers / _remote_headers
-            # which call _make_auth_token_factory fresh each time.
-            return
     login_cmd = f"omnigent login {server}"
     if non_interactive or not sys.stdin.isatty():
         raise click.ClickException(
