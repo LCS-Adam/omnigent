@@ -137,7 +137,11 @@ from omnigent.runtime.policies.approval import (
     build_elicitation_request_event,
     resolve_ask_timeout,
 )
-from omnigent.runtime.policies.builder import build_policy_engine, load_session_usage
+from omnigent.runtime.policies.builder import (
+    any_policies_apply,
+    build_policy_engine,
+    load_session_usage,
+)
 from omnigent.runtime.policies.engine import PolicyEngine
 from omnigent.runtime.tool_output import cap_tool_output
 from omnigent.server import presence, session_live_state
@@ -17061,6 +17065,27 @@ def create_sessions_router(
         )
 
         _caps = get_caps()
+
+        # Fast path: if no policies would fire (no agent guardrails, no
+        # session policies, no server-wide defaults), skip the engine build
+        # entirely. This avoids conversation-store reads for labels/state/usage
+        # on every tool call for the common no-policy case. Session policies are
+        # LRU-cached so this check is cheap after the first call per session.
+        # Users can add policies mid-session — the cache is invalidated on
+        # mutation, so newly added policies are visible on the very next call.
+        if not any_policies_apply(
+            spec=loaded.spec,
+            conversation_id=session_id,
+            default_policies=_caps.default_policies,
+            policy_store=get_policy_store(),
+            phase=phase,
+            tool_name=data.get("name") if isinstance(data, dict) else None,
+        ):
+            return Response(
+                content=json.dumps({"result": "POLICY_ACTION_ALLOW"}),
+                media_type="application/json",
+            )
+
         _host_conn = (
             _caps.policy_llm_connection_factory() if _caps.policy_llm_connection_factory else None
         )
