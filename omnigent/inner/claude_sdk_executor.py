@@ -71,6 +71,7 @@ from .executor import (
 )
 from .sandbox import (
     create_exec_launcher,
+    get_backend,
     resolve_sandbox,
     with_additional_read_roots,
     with_additional_write_files,
@@ -920,6 +921,15 @@ def prepare_claude_cli_path(
 ) -> PreparedClaudeCli:
     """Wrap the Claude CLI in the agent's configured sandbox when possible.
 
+    Degrades instead of crashing: when the sandbox can't be resolved or
+    the wrap can't be built (unsupported platform, un-grantable
+    interpreter layout, profile-size overflow), the CLI is returned
+    unwrapped with native tools disabled — the same confinement story
+    as ``OMNIGENT_CLAUDE_SDK_NO_SANDBOX``: file/shell access still goes
+    through the independently sandboxed ``sys_os_*`` helpers (which
+    fail closed on their own), and only the CLI supervisor process
+    runs unwrapped.
+
     :param real_cli_path: Absolute path to the system-installed Claude CLI
         binary, or ``None`` when no CLI is available.
     :param spec: The agent's ``os_env`` spec.  Only ``caller_process`` specs
@@ -939,7 +949,17 @@ def prepare_claude_cli_path(
         return PreparedClaudeCli(cli_path=real_cli_path, enable_native_tools=True)
 
     cwd = _resolve_sandbox_cwd(spec.cwd)
-    sandbox = resolve_sandbox(spec, cwd)
+    try:
+        sandbox = resolve_sandbox(spec, cwd)
+    except (OSError, NotImplementedError) as exc:
+        logger.warning(
+            "Cannot resolve the configured sandbox for the Claude CLI wrap; "
+            "running the CLI unwrapped with native tools disabled "
+            "(file/shell access stays confined to the sandboxed sys_os_* "
+            "tools): %s",
+            exc,
+        )
+        return PreparedClaudeCli(cli_path=real_cli_path, enable_native_tools=False)
     if not sandbox.active:
         return PreparedClaudeCli(cli_path=real_cli_path, enable_native_tools=False)
     if not sandbox.allow_network:
@@ -950,6 +970,26 @@ def prepare_claude_cli_path(
     sandbox = with_additional_read_roots(sandbox, _claude_internal_write_roots())
     sandbox = with_additional_write_roots(sandbox, _claude_internal_write_roots())
     sandbox = with_additional_write_files(sandbox, _claude_internal_write_files())
+    # Dry-run the spawn-time wrap now, while degrading is still possible.
+    # The real wrap happens later inside run_launcher, where an OSError
+    # (un-grantable interpreter layout, profile-size cap, cwd-scan
+    # overflow) kills the launcher and surfaces as an opaque connect
+    # timeout. By run time native tools are already enabled, so this is
+    # the last point where "skip the wrap" is still safe.
+    try:
+        get_backend(sandbox.backend_type).wrap_launcher_argv(
+            [sys.executable, "-c", "pass"], sandbox, cwd, target=real_cli_path
+        )
+    except OSError as exc:
+        logger.warning(
+            "The configured sandbox cannot wrap the Claude CLI at %s; "
+            "running it unwrapped with native tools disabled (file/shell "
+            "access stays confined to the sandboxed sys_os_* tools). "
+            "Remediation hints in the underlying error: %s",
+            real_cli_path,
+            exc,
+        )
+        return PreparedClaudeCli(cli_path=real_cli_path, enable_native_tools=False)
     return PreparedClaudeCli(
         cli_path=create_exec_launcher(real_cli_path, sandbox),
         enable_native_tools=True,

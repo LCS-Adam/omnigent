@@ -2602,6 +2602,144 @@ def test_prepare_tight_cli_process_path_bypasses_wrapper_when_env_set(monkeypatc
     assert prepare_tight_cli_process_path("/usr/bin/claude") == "/usr/bin/claude"
 
 
+def _wrap_probe_spec():
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    return OSEnvSpec(
+        type="caller_process",
+        cwd="/tmp/work",
+        sandbox=OSEnvSandboxSpec(
+            type="linux_bwrap",
+            read_paths=["."],
+            write_paths=["."],
+            allow_network=True,
+        ),
+    )
+
+
+def _active_policy():
+    from omnigent.inner.sandbox import SandboxPolicy
+
+    return SandboxPolicy(
+        backend_type="linux_bwrap",
+        active=True,
+        read_roots=[Path("/tmp/work")],
+        write_roots=[Path("/tmp/work")],
+        write_files=[],
+        allow_network=True,
+    )
+
+
+def test_prepare_claude_cli_path_degrades_when_resolve_sandbox_fails(monkeypatch, caplog) -> None:
+    """
+    A ``resolve_sandbox`` failure (e.g. ``sandbox-exec`` missing on the
+    host) must NOT crash the seat at connect time. The prepare degrades
+    to the raw CLI with native tools disabled — the same confinement
+    shape as the ``OMNIGENT_CLAUDE_SDK_NO_SANDBOX`` bypass — and warns.
+    """
+    from omnigent.inner.claude_sdk_executor import prepare_claude_cli_path
+
+    def _raise_resolve(*args, **kwargs):
+        raise OSError("darwin_seatbelt requires sandbox-exec on PATH")
+
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor.resolve_sandbox", _raise_resolve)
+
+    def _fail_if_called(*args, **kwargs) -> str:
+        raise AssertionError("create_exec_launcher must not run when resolve failed")
+
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor.create_exec_launcher", _fail_if_called)
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor"):
+        prepared = prepare_claude_cli_path("/usr/bin/claude", _wrap_probe_spec())
+
+    assert prepared.cli_path == "/usr/bin/claude"
+    assert prepared.enable_native_tools is False
+    assert any(
+        "Cannot resolve the configured sandbox" in record.getMessage() for record in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_prepare_claude_cli_path_degrades_when_wrap_probe_fails(monkeypatch, caplog) -> None:
+    """
+    When the backend can resolve but the spawn-time wrap can't be built
+    (un-grantable interpreter layout, profile-size cap, cwd-scan
+    overflow), the OSError previously fired inside ``run_launcher`` and
+    killed the CLI spawn with an opaque connect timeout. The prepare-
+    time probe must catch it and degrade — unwrapped CLI, native tools
+    OFF, loud warning — never raise.
+    """
+    from omnigent.inner.claude_sdk_executor import prepare_claude_cli_path
+
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.resolve_sandbox",
+        lambda *a, **k: _active_policy(),
+    )
+
+    class _RefusingBackend:
+        def wrap_launcher_argv(self, *args, **kwargs):
+            raise OSError("would require widening the sandbox read view")
+
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.get_backend",
+        lambda name: _RefusingBackend(),
+    )
+
+    def _fail_if_called(*args, **kwargs) -> str:
+        raise AssertionError("create_exec_launcher must not run when the wrap probe failed")
+
+    monkeypatch.setattr("omnigent.inner.claude_sdk_executor.create_exec_launcher", _fail_if_called)
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.claude_sdk_executor"):
+        prepared = prepare_claude_cli_path("/usr/bin/claude", _wrap_probe_spec())
+
+    assert prepared.cli_path == "/usr/bin/claude"
+    assert prepared.enable_native_tools is False
+    assert any("cannot wrap the Claude CLI" in record.getMessage() for record in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
+
+
+def test_prepare_claude_cli_path_probe_passes_target_and_still_wraps(
+    monkeypatch,
+) -> None:
+    """
+    The happy path is unchanged by the probe: the wrap still happens,
+    native tools stay ON, and the probe exercises the same lane the
+    launcher will (``target=<real CLI>``), so a probe pass means the
+    run-time wrap can build the same grants.
+    """
+    from omnigent.inner.claude_sdk_executor import prepare_claude_cli_path
+
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.resolve_sandbox",
+        lambda *a, **k: _active_policy(),
+    )
+
+    seen: dict[str, object] = {}
+
+    class _OkBackend:
+        def wrap_launcher_argv(self, argv, policy, cwd, chdir=None, target=None):
+            seen["target"] = target
+            return ["bwrap", "--", *argv]
+
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.get_backend",
+        lambda name: _OkBackend(),
+    )
+    monkeypatch.setattr(
+        "omnigent.inner.claude_sdk_executor.create_exec_launcher",
+        lambda path, sandbox: "/tmp/launcher",
+    )
+
+    prepared = prepare_claude_cli_path("/usr/bin/claude", _wrap_probe_spec())
+
+    assert prepared.cli_path == "/tmp/launcher"
+    assert prepared.enable_native_tools is True
+    assert seen["target"] == "/usr/bin/claude", (
+        "The probe must exercise the target lane run_launcher will use."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests: _to_anthropic_content_blocks
 # ---------------------------------------------------------------------------
