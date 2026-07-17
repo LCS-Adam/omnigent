@@ -17088,7 +17088,10 @@ def create_sessions_router(
             )
 
         engine = _build_engine()
-        ctx = _build_evaluation_context(phase, data, event, actor=_build_actor(user_id))
+        _session_owner = conversation_store.get_session_owner(session_id)
+        ctx = _build_evaluation_context(
+            phase, data, event, actor=_build_actor(_session_owner or user_id)
+        )
         result = await engine.evaluate(ctx, read_only=is_read_only)
 
         # URL-based elicitation for blocking phases: on a TOOL_CALL or
@@ -21847,6 +21850,7 @@ def create_sessions_router(
             )
 
         if method == "tools/call":
+            _session_owner = conversation_store.get_session_owner(session_id)
             return await _handle_mcp_tools_call(
                 rpc_id,
                 session_id,
@@ -21854,7 +21858,7 @@ def create_sessions_router(
                 conversation_store,
                 agent_store,
                 runner_router,
-                actor=_build_actor(user_id),
+                actor=_build_actor(_session_owner or user_id),
                 request=request,
             )
 
