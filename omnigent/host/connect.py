@@ -478,6 +478,11 @@ _RETRYABLE_UPGRADE_STATUSES: frozenset[int] = frozenset({408, 429})
 # HAS connected keeps retrying indefinitely, so a deploy restart never
 # kills a live host with running sessions.
 _LOGIN_REDIRECT_FATAL_ATTEMPTS = 3
+# Consecutive HTTP 401 responses before the host gives up and fails fatal.
+# A small number of retries lets the Databricks SDK auth factory refresh its
+# token (which happens inside _build_auth_headers on each reconnect) and
+# handles transient server-side auth hiccups without looping indefinitely.
+_MAX_CONSECUTIVE_401S = 3
 
 
 class HostConnectError(Exception):
@@ -654,6 +659,10 @@ class HostProcess:
         self._ever_connected = False
         # Consecutive login-page redirects; reset by a successful upgrade.
         self._login_redirect_streak = 0
+        # Consecutive HTTP 401 responses; reset on a successful upgrade.
+        # A run of 401s may be a transient auth blip or a token the Databricks
+        # SDK can refresh — allow a few retries before declaring fatal.
+        self._consecutive_401s = 0
         # Live tunnel connection, set by _serve_frames for the watcher
         # tasks (which outlive any single connection) to report on.
         self._ws: websockets.asyncio.client.ClientConnection | None = None
@@ -993,12 +1002,24 @@ class HostProcess:
         if status in _RETRYABLE_UPGRADE_STATUSES or not (400 <= status < 500):
             return None
         if status == 401:
+            self._consecutive_401s += 1
+            # Allow a handful of retries: the Databricks SDK auth factory can
+            # refresh its token on the next _build_auth_headers call, and a
+            # transient server-side auth hiccup may clear on its own. After
+            # _MAX_CONSECUTIVE_401S attempts we give up and fail permanent.
+            if self._consecutive_401s < _MAX_CONSECUTIVE_401S:
+                _logger.warning(
+                    "Host tunnel rejected with HTTP 401 (attempt %d/%d); "
+                    "refreshing credentials and retrying. %s",
+                    self._consecutive_401s,
+                    _MAX_CONSECUTIVE_401S,
+                    self._credentials_fix_hint(),
+                )
+                return None  # retryable — reconnect loop will refresh headers
             return HostConnectError(
-                "Authentication failed (HTTP 401): the server rejected the "
-                "supplied credentials. "
-                + self._credentials_fix_hint()
-                + " "
-                + self._login_fix_hint()
+                f"Authentication failed (HTTP 401) after {self._consecutive_401s} "
+                "attempts: the server consistently rejected the supplied "
+                "credentials. " + self._credentials_fix_hint() + " " + self._login_fix_hint()
             )
         if status == 403:
             return HostConnectError(
@@ -1758,6 +1779,7 @@ class HostProcess:
         # from here on are server restarts, not an unauthenticated host.
         self._ever_connected = True
         self._login_redirect_streak = 0
+        self._consecutive_401s = 0
         try:
             await self._serve_frames(ws)
         finally:
