@@ -30,8 +30,6 @@ from omnigent.host.frames import (
     HostCreateDirResultFrame,
     HostCreateWorktreeFrame,
     HostCreateWorktreeResultFrame,
-    HostFsRequestFrame,
-    HostFsResultFrame,
     HostHelloFrame,
     HostLaunchRunnerFrame,
     HostLaunchRunnerResultFrame,
@@ -43,8 +41,6 @@ from omnigent.host.frames import (
     HostRemoveWorktreeFrame,
     HostRemoveWorktreeResultFrame,
     HostRunnerExitedFrame,
-    HostRunnerStatusFrame,
-    HostRunnerStatusResultFrame,
     HostStatFrame,
     HostStatResultFrame,
     HostStopRunnerFrame,
@@ -482,6 +478,11 @@ _RETRYABLE_UPGRADE_STATUSES: frozenset[int] = frozenset({408, 429})
 # HAS connected keeps retrying indefinitely, so a deploy restart never
 # kills a live host with running sessions.
 _LOGIN_REDIRECT_FATAL_ATTEMPTS = 3
+# Consecutive HTTP 401 responses before the host gives up and fails fatal.
+# A small number of retries lets the Databricks SDK auth factory refresh its
+# token (which happens inside _build_auth_headers on each reconnect) and
+# handles transient server-side auth hiccups without looping indefinitely.
+_MAX_CONSECUTIVE_AUTH_ERRORS = 3
 
 
 class HostConnectError(Exception):
@@ -658,6 +659,10 @@ class HostProcess:
         self._ever_connected = False
         # Consecutive login-page redirects; reset by a successful upgrade.
         self._login_redirect_streak = 0
+        # Consecutive HTTP 401/403 auth rejections; reset on a successful upgrade
+        # or any non-auth failure. Auth failures may be transient or refreshable
+        # (the Databricks SDK can mint a fresh token on the next reconnect).
+        self._consecutive_auth_errors = 0
         # Live tunnel connection, set by _serve_frames for the watcher
         # tasks (which outlive any single connection) to report on.
         self._ws: websockets.asyncio.client.ClientConnection | None = None
@@ -996,22 +1001,39 @@ class HostProcess:
         """
         if status in _RETRYABLE_UPGRADE_STATUSES or not (400 <= status < 500):
             return None
-        if status == 401:
+        if status in {401, 403}:
+            self._consecutive_auth_errors += 1
+            # Allow a handful of retries: the Databricks SDK auth factory can
+            # refresh its token on the next _build_auth_headers call, and a
+            # transient server-side auth hiccup may clear on its own. After
+            # _MAX_CONSECUTIVE_AUTH_ERRORS attempts we give up and fail fatal.
+            if self._consecutive_auth_errors < _MAX_CONSECUTIVE_AUTH_ERRORS:
+                _logger.warning(
+                    "Host tunnel rejected with HTTP %d (attempt %d/%d); "
+                    "refreshing credentials and retrying. %s",
+                    status,
+                    self._consecutive_auth_errors,
+                    _MAX_CONSECUTIVE_AUTH_ERRORS,
+                    self._credentials_fix_hint(),
+                )
+                return None  # retryable — reconnect loop will refresh headers
+            n = self._consecutive_auth_errors
+            if status == 401:
+                return HostConnectError(
+                    f"Authentication failed (HTTP 401) after {n} attempts: "
+                    "the server consistently rejected the supplied credentials. "
+                    + self._credentials_fix_hint()
+                    + " "
+                    + self._login_fix_hint()
+                )
             return HostConnectError(
-                "Authentication failed (HTTP 401): the server rejected the "
-                "supplied credentials. "
-                + self._credentials_fix_hint()
-                + " "
-                + self._login_fix_hint()
-            )
-        if status == 403:
-            return HostConnectError(
-                "Connection refused (HTTP 403): the credentials authenticated, "
-                "but the server did not accept the host tunnel. Either your "
-                "identity is not authorized to register a host on this server, "
-                "or the server is running a build that predates the host API "
-                "(the /v1/hosts tunnel route). Confirm you have access and that "
-                "the server is up to date, then retry. " + self._login_fix_hint()
+                f"Connection refused (HTTP 403) after {n} attempts: "
+                "the credentials authenticated, but the server did not accept "
+                "the host tunnel. Either your identity is not authorized to "
+                "register a host on this server, or the server is running a "
+                "build that predates the host API (/v1/hosts tunnel route). "
+                "Confirm you have access and that the server is up to date, "
+                "then retry. " + self._login_fix_hint()
             )
         if status == 409:
             return HostConnectError(
@@ -1191,37 +1213,6 @@ class HostProcess:
         return HostStopRunnerResultFrame(
             request_id=frame.request_id,
             status="stopped",
-        )
-
-    def _handle_runner_status(
-        self,
-        frame: HostRunnerStatusFrame,
-    ) -> HostRunnerStatusResultFrame:
-        """Answer whether a runner's process is alive, dead, or unknown.
-
-        The host is the authoritative owner of runner liveness: it holds
-        the runner's :class:`subprocess.Popen`. A runner tracked with a
-        still-running process is ``alive`` (covers a runner that is still
-        booting — it is inserted at ``Popen`` time, before its tunnel
-        connects — so the server waits for it). A tracked-but-exited
-        process is ``dead``. A runner this host has no record of is
-        ``unknown`` — it was stopped (``_handle_stop`` popped it) or a
-        fresh post-restart host never spawned it; either way it will never
-        connect, so the server relaunches without waiting.
-
-        :param frame: The status query frame.
-        :returns: Result frame with ``alive`` / ``dead`` / ``unknown``.
-        """
-        handle = self._runners.get(frame.runner_id)
-        if handle is None:
-            status = "unknown"
-        elif handle.proc.poll() is None:
-            status = "alive"
-        else:
-            status = "dead"
-        return HostRunnerStatusResultFrame(
-            request_id=frame.request_id,
-            status=status,
         )
 
     async def _watch_runner(self, runner_id: str) -> None:
@@ -1520,120 +1511,6 @@ class HostProcess:
             path=created,
         )
 
-    def _handle_fs_request(self, frame: HostFsRequestFrame) -> HostFsResultFrame:
-        """Serve a read-only workspace filesystem request from the host.
-
-        Runs :class:`omnigent.workspace_fs.WorkspaceReader` against the
-        session's workspace so the web UI's file panel keeps working when
-        the runner is offline but the host still holds the workspace on
-        disk. Read-only and confined to the workspace root; never writes
-        or runs a shell. Called inside a worker thread by the dispatcher
-        because git / directory-walk work can block.
-
-        :param frame: The fs request frame (op + workspace + params).
-        :returns: A result frame with the runner-shaped payload, or an
-            error frame mirroring the status the runner would return.
-        """
-        from pathlib import Path
-
-        from omnigent.workspace_fs import WorkspaceReader, WorkspaceReaderError
-
-        try:
-            expanded = os.path.expanduser(frame.workspace)
-        except (TypeError, ValueError) as exc:
-            return HostFsResultFrame(
-                request_id=frame.request_id,
-                status="error",
-                error_status=400,
-                error_code="invalid_workspace",
-                error=f"workspace path expansion failed: {exc}",
-            )
-        if not os.path.isdir(expanded):
-            return HostFsResultFrame(
-                request_id=frame.request_id,
-                status="error",
-                error_status=404,
-                error_code="not_found",
-                error="workspace directory does not exist on host",
-            )
-
-        reader = WorkspaceReader(Path(expanded))
-        params = frame.params or {}
-        try:
-            payload = self._dispatch_fs_op(reader, frame.op, frame.session_id, params)
-        except WorkspaceReaderError as exc:
-            return HostFsResultFrame(
-                request_id=frame.request_id,
-                status="error",
-                error_status=exc.status,
-                error_code=exc.code,
-                error=exc.message,
-            )
-        except ValueError as exc:
-            return HostFsResultFrame(
-                request_id=frame.request_id,
-                status="error",
-                error_status=400,
-                error_code="invalid_request",
-                error=str(exc),
-            )
-        except Exception as exc:
-            _logger.exception("host fs_request op %r failed", frame.op)
-            return HostFsResultFrame(
-                request_id=frame.request_id,
-                status="error",
-                error_status=500,
-                error_code="fs_read_failed",
-                error=str(exc),
-            )
-        return HostFsResultFrame(
-            request_id=frame.request_id,
-            status="ok",
-            payload=payload,
-        )
-
-    @staticmethod
-    def _dispatch_fs_op(
-        reader: object,
-        op: str,
-        session_id: str,
-        params: dict[str, object],
-    ) -> dict[str, object]:
-        """Route an fs op to the matching :class:`WorkspaceReader` method.
-
-        :param reader: The workspace reader bound to the workspace root.
-        :param op: Operation name from the request frame.
-        :param session_id: Session id forwarded to change-registry ops.
-        :param params: Operation-specific arguments.
-        :returns: The runner-shaped result dict.
-        :raises ValueError: On an unknown op.
-        """
-        from typing import cast
-
-        from omnigent.workspace_fs import WorkspaceReader
-
-        r = cast("WorkspaceReader", reader)
-        if op == "list_or_read":
-            return r.list_or_read(
-                str(params.get("path", "")),
-                limit=int(params.get("limit", 20)),
-                after=cast("str | None", params.get("after")),
-                before=cast("str | None", params.get("before")),
-                order=str(params.get("order", "desc")),
-            )
-        if op == "changes":
-            return r.changes(session_id)
-        if op == "diff":
-            return r.diff(session_id, str(params.get("path", "")))
-        if op == "search":
-            return r.search(
-                str(params.get("q", "")),
-                include=cast("str | None", params.get("include")),
-                exclude=cast("str | None", params.get("exclude")),
-                limit=int(params.get("limit", 500)),
-            )
-        raise ValueError(f"unknown fs op: {op!r}")
-
     async def _handle_create_worktree(
         self,
         frame: HostCreateWorktreeFrame,
@@ -1798,6 +1675,17 @@ class HostProcess:
                         # riding out a messy restart isn't killed by
                         # redirects accumulated across unrelated errors.
                         self._login_redirect_streak = 0
+                    # Non-auth failures (5xx, network drop, mid-serve
+                    # disconnect) also reset the auth error counter —
+                    # _consecutive_auth_errors counts CONSECUTIVE
+                    # rejections only. Auth-error InvalidStatus exceptions
+                    # are NOT reset here; they already incremented the
+                    # counter in _classify_http_status and must accumulate.
+                    is_auth_rejection = isinstance(
+                        exc, InvalidStatus
+                    ) and exc.response.status_code in {401, 403}
+                    if not is_auth_rejection:
+                        self._consecutive_auth_errors = 0
                     # Classify the disconnect to choose a reconnect cadence.
                     #
                     # 1012 "service restart" / 1001 "going away" are explicit
@@ -1907,6 +1795,7 @@ class HostProcess:
         # from here on are server restarts, not an unauthenticated host.
         self._ever_connected = True
         self._login_redirect_streak = 0
+        self._consecutive_auth_errors = 0
         try:
             await self._serve_frames(ws)
         finally:
@@ -2101,8 +1990,6 @@ class HostProcess:
             await ws.send(encode_host_frame(await self._handle_launch(frame)))
         elif isinstance(frame, HostStopRunnerFrame):
             await ws.send(encode_host_frame(self._handle_stop(frame)))
-        elif isinstance(frame, HostRunnerStatusFrame):
-            await ws.send(encode_host_frame(self._handle_runner_status(frame)))
         elif isinstance(frame, HostStatFrame):
             await ws.send(encode_host_frame(self._handle_stat(frame)))
         elif isinstance(frame, HostListDirFrame):
@@ -2115,11 +2002,6 @@ class HostProcess:
             await ws.send(encode_host_frame(await self._handle_remove_worktree(frame)))
         elif isinstance(frame, HostListWorktreesFrame):
             await ws.send(encode_host_frame(await self._handle_list_worktrees(frame)))
-        elif isinstance(frame, HostFsRequestFrame):
-            # Git status and directory walks can block, so run the read
-            # off the event loop and reply when it completes.
-            result = await asyncio.to_thread(self._handle_fs_request, frame)
-            await ws.send(encode_host_frame(result))
 
 
 def run_host_process(

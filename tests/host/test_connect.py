@@ -31,8 +31,6 @@ from omnigent.host.frames import (
     HostListDirFrame,
     HostListDirResultFrame,
     HostRunnerExitedFrame,
-    HostRunnerStatusFrame,
-    HostRunnerStatusResultFrame,
     HostStatFrame,
     HostStatResultFrame,
     HostStopRunnerFrame,
@@ -746,77 +744,6 @@ def test_handle_stop_unknown_runner() -> None:
     assert isinstance(result, HostStopRunnerResultFrame)
     assert result.status == "failed"
     assert "unknown runner" in (result.error or "")
-
-
-def test_handle_runner_status_alive_for_running_process(tmp_path: Path) -> None:
-    """
-    Verify ``_handle_runner_status`` reports ``alive`` for a tracked
-    runner whose process is still running.
-
-    This is the still-booting / still-serving case: the server must wait
-    for this runner's tunnel rather than relaunch a healthy process.
-    """
-    host = _make_host_process()
-    proc = subprocess.Popen(
-        ["sleep", "60"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        host._runners["runner_live"] = _RunnerHandle(
-            proc=proc, log_path=tmp_path / "runner-live.log"
-        )
-        result = host._handle_runner_status(
-            HostRunnerStatusFrame(request_id="req_rs", runner_id="runner_live")
-        )
-        assert isinstance(result, HostRunnerStatusResultFrame)
-        assert result.request_id == "req_rs"
-        assert result.status == "alive"
-    finally:
-        proc.terminate()
-        proc.wait()
-
-
-def test_handle_runner_status_dead_for_exited_process(tmp_path: Path) -> None:
-    """
-    Verify ``_handle_runner_status`` reports ``dead`` for a tracked
-    runner whose process has exited.
-
-    A tracked-but-exited runner will never connect its tunnel, so the
-    server must relaunch immediately instead of burning the connect
-    grace on it.
-    """
-    host = _make_host_process()
-    proc = subprocess.Popen(
-        ["true"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    proc.wait()  # ensure the process has exited before we query
-    host._runners["runner_gone"] = _RunnerHandle(proc=proc, log_path=tmp_path / "runner-gone.log")
-    result = host._handle_runner_status(
-        HostRunnerStatusFrame(request_id="req_rs", runner_id="runner_gone")
-    )
-    assert isinstance(result, HostRunnerStatusResultFrame)
-    assert result.status == "dead"
-
-
-def test_handle_runner_status_unknown_for_untracked_runner() -> None:
-    """
-    Verify ``_handle_runner_status`` reports ``unknown`` for a runner
-    this host has no record of.
-
-    Covers a runner that was stopped (``_handle_stop`` popped it) and a
-    fresh post-restart host that never spawned it — the exact
-    host-restart case that used to strand the server on a full connect
-    grace. Both must read ``unknown`` so the server relaunches at once.
-    """
-    host = _make_host_process()
-    result = host._handle_runner_status(
-        HostRunnerStatusFrame(request_id="req_rs", runner_id="runner_never_seen")
-    )
-    assert isinstance(result, HostRunnerStatusResultFrame)
-    assert result.status == "unknown"
 
 
 def test_alive_runner_ids_cleans_dead(tmp_path: Path) -> None:
@@ -2311,13 +2238,18 @@ async def test_connected_host_retries_login_redirects_indefinitely(
 async def test_run_fails_loud_on_permanent_4xx(
     monkeypatch: pytest.MonkeyPatch, status: int, expected: str
 ) -> None:
-    """A permanent 4xx upgrade rejection fails loud on the first attempt.
+    """A permanent 4xx upgrade rejection eventually fails loud.
 
-    401/403/other-4xx mean unauthenticated / unauthorized / wrong-or-old
-    server — reconnecting can never succeed, so run() must raise
-    HostConnectError immediately rather than backing off.
+    404 and other non-auth 4xx fail immediately (1 attempt).
+    401/403 are given _MAX_CONSECUTIVE_AUTH_ERRORS retries so the
+    Databricks SDK auth factory can mint a fresh token; after exhausting
+    them run() raises HostConnectError.
     """
-    spy = _ConnectSpy([_invalid_status(status)])
+    from omnigent.host.connect import _MAX_CONSECUTIVE_AUTH_ERRORS
+
+    is_auth = status in {401, 403}
+    n = _MAX_CONSECUTIVE_AUTH_ERRORS if is_auth else 1
+    spy = _ConnectSpy([_invalid_status(status)] * n)
     _patch_connect(monkeypatch, spy)
     host = _host()
 
@@ -2326,9 +2258,8 @@ async def test_run_fails_loud_on_permanent_4xx(
 
     # Message identifies the specific permanent failure.
     assert expected in str(excinfo.value)
-    # Exactly one attempt → no silent reconnect/backoff. If >1, the 4xx
-    # was misclassified as transient and the loop kept retrying.
-    assert spy.call_count == 1
+    # Auth errors retry up to the limit; other 4xx fail on the first attempt.
+    assert spy.call_count == n
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -2343,8 +2274,10 @@ async def test_auth_rejection_suggests_omnigent_login(
     fatal message must name the exact remedy command, including the
     server URL, so the user can copy-paste it.
     """
+    from omnigent.host.connect import _MAX_CONSECUTIVE_AUTH_ERRORS
+
     server_url = "https://app.example.databricks.com"
-    spy = _ConnectSpy([_invalid_status(status)])
+    spy = _ConnectSpy([_invalid_status(status)] * _MAX_CONSECUTIVE_AUTH_ERRORS)
     _patch_connect(monkeypatch, spy)
     host = _host(server_url=server_url)
 
@@ -2377,6 +2310,64 @@ async def test_non_auth_permanent_4xx_omits_login_hint(
     # error that happens to lack "login") before asserting the absence.
     assert "HTTP 404" in message
     assert "omnigent login" not in message
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_auth_errors_then_success_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """Auth errors within the retry budget followed by a successful connect.
+
+    Simulates the Databricks SDK refreshing its token on the second or
+    third attempt: the host should connect normally and not raise.
+
+    :param status: 401 or 403 — both retry up to _MAX_CONSECUTIVE_AUTH_ERRORS.
+    """
+
+    # One auth rejection, then a successful connect, then cancel.
+    spy = _ConnectSpy([_invalid_status(status), None, asyncio.CancelledError()])
+    _patch_connect(monkeypatch, spy)
+    host = _host()
+
+    # Should not raise HostConnectError — the auth error was recovered.
+    await host.run()
+
+    # The auth rejection + the successful connect + the cancel = 3 calls.
+    assert spy.call_count == 3
+    # Counter reset on successful upgrade — a subsequent auth error streak
+    # should still get _MAX_CONSECUTIVE_AUTH_ERRORS fresh retries.
+    assert host._consecutive_auth_errors == 0
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_non_auth_failure_resets_consecutive_auth_errors(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """A non-auth failure (5xx) resets _consecutive_auth_errors.
+
+    An auth rejection followed by an unrelated 5xx bounce should give
+    the next auth rejection a fresh budget, not carry over the prior
+    count — _consecutive_auth_errors tracks CONSECUTIVE auth failures.
+    """
+    from omnigent.host.connect import _MAX_CONSECUTIVE_AUTH_ERRORS
+
+    # Auth failure → non-auth failure → auth failure ... × _MAX → fatal.
+    # The non-auth failure in the middle must reset the counter so the
+    # second run of auth failures exhausts a fresh budget.
+    n = _MAX_CONSECUTIVE_AUTH_ERRORS
+    spy = _ConnectSpy(
+        [_invalid_status(status)]  # auth #1
+        + [_invalid_status(503)]  # non-auth resets counter
+        + [_invalid_status(status)] * n  # auth #1..n → fatal
+    )
+    _patch_connect(monkeypatch, spy)
+    host = _host()
+
+    with pytest.raises(HostConnectError):
+        await host.run()
+
+    # 1 auth + 1 non-auth + n auth = n+2 total calls.
+    assert spy.call_count == n + 2
 
 
 @pytest.mark.parametrize("status", [408, 429, 500, 503])
