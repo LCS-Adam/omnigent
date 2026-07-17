@@ -174,52 +174,6 @@ jobs:
           [ -n "${BASE:-}" ] && args+=(--base "$BASE")
           python3 .github/scripts/changelog/generate.py "${args[@]}"
 
-      - name: Set up uv
-        if: steps.guard.outputs.proceed == 'true' && steps.creds.outputs.available == 'true'
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-        with:
-          enable-cache: true
-
-      - name: Cache virtualenv
-        if: steps.guard.outputs.proceed == 'true' && steps.creds.outputs.available == 'true'
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('.python-version') }}-${{ hashFiles('uv.lock') }}
-
-      - name: Install dependencies
-        if: steps.guard.outputs.proceed == 'true' && steps.creds.outputs.available == 'true'
-        run: uv sync --extra all --extra dev
-
-      - name: Install Claude Code CLI
-        if: steps.guard.outputs.proceed == 'true' && steps.creds.outputs.available == 'true'
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-        run: |
-          mkdir -p "${GITHUB_WORKSPACE}/.cc-cli" && cd "${GITHUB_WORKSPACE}/.cc-cli"
-          npm install --ignore-scripts --no-audit --no-fund @anthropic-ai/claude-code@2.1.170
-          node node_modules/@anthropic-ai/claude-code/install.cjs
-          echo "${GITHUB_WORKSPACE}/.cc-cli/node_modules/.bin" >> "$GITHUB_PATH"
-
-      - name: Write Omnigent provider config
-        if: steps.guard.outputs.proceed == 'true' && steps.creds.outputs.available == 'true'
-        env:
-          GATEWAY_BASE_URL: ${{ secrets.GATEWAY_BASE_URL }}
-        run: |
-          mkdir -p "$HOME/.omnigent"
-          python3 -c "
-          import pathlib, os, json
-          gw = os.environ['GATEWAY_BASE_URL']
-          cfg = {'providers': {'databricks-gateway': {
-              'kind': 'gateway', 'default': ['anthropic'],
-              'anthropic': {
-                  'base_url': gw + '/anthropic',
-                  'api_key_ref': 'env:LLM_API_KEY',
-                  'models': {'default': 'databricks-claude-opus-4-8'},
-              }}}}
-          pathlib.Path.home().joinpath('.omnigent', 'config.yaml').write_text(json.dumps(cfg, indent=2))
-          "
-
       # --- 1) Scout: which features (if any) are blog-worthy? ---
       - name: Build scout prompt
         if: steps.guard.outputs.proceed == 'true' && steps.creds.outputs.available == 'true'
@@ -251,30 +205,22 @@ jobs:
           pathlib.Path("/tmp/scout_prompt.txt").write_text(prompt)
           PYEOF
 
+      # Sets up uv + Claude CLI + the gateway provider config, runs the tools-less
+      # scout on the prompt file, and secret-scans its stdout — the same runner
+      # scaffold draft-release-notes.yml / publish-changelog.yml share. The env it
+      # sets up (PATH, ~/.omnigent, .venv) persists into the drafter loop below, so
+      # only the scout needs to invoke the action.
       - name: Run feature-blog scout
         id: scout
         if: steps.guard.outputs.proceed == 'true' && steps.creds.outputs.available == 'true'
-        env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-        run: |
-          set -euo pipefail
-          prompt="$(cat /tmp/scout_prompt.txt)"
-          uv run --project "${GITHUB_WORKSPACE}" omnigent run \
-            "${GITHUB_WORKSPACE}/.github/agents/feature-blog-scout" \
-            -p "$prompt" --no-session \
-            2>scout-stderr.log | tee /tmp/scout_out.txt \
-            || { echo "::warning::scout exited non-zero — treating as no candidates"; cat scout-stderr.log; }
-
-      - name: Scan scout output for secrets
-        if: steps.scout.outcome == 'success'
-        env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -n "${LLM_API_KEY:-}" ] && grep -qF "$LLM_API_KEY" /tmp/scout_out.txt 2>/dev/null; then
-            echo "::error::Scout output contains LLM_API_KEY — aborting."
-            exit 1
-          fi
+        uses: ./.github/actions/run-omnigent-agent
+        with:
+          agent: feature-blog-scout
+          prompt-file: /tmp/scout_prompt.txt
+          output-file: /tmp/scout_out.txt
+          stderr-file: ${{ github.workspace }}/scout-stderr.log
+          gateway-base-url: ${{ secrets.GATEWAY_BASE_URL }}
+          llm-api-key: ${{ secrets.LLM_API_KEY }}
 
       - name: Parse candidates
         id: candidates
