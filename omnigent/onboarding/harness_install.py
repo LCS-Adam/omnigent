@@ -10,8 +10,10 @@ A coding harness is "ready" along two independent axes:
   npm packages it installs.
 
 ``omnigent setup --no-internal-beta`` uses this to mark an uninstalled harness and
-offer to ``npm install`` it; the first-run ``omnigent run`` flow uses the
-same map so the two surfaces never disagree about what the machine can launch.
+offer to install it (``npm install -g …`` for npm CLIs, or the vendor
+``install_hint`` curl/brew command for Hermes and friends); the first-run
+``omnigent run`` flow uses the same map so the two surfaces never disagree
+about what the machine can launch.
 
 This module also owns the per-harness **CLI binary name**, so it is the natural
 home for driving each harness's own *subscription login/logout* commands
@@ -174,8 +176,8 @@ _HARNESS_INSTALL: dict[str, HarnessInstallSpec] = {
     # CLI instead of guessing from a credential file. (The readiness layer still
     # uses the subprocess-free file check ``gemini_login_detected`` for its fast
     # path.) ``agy`` ships via a shell installer rather than npm, so ``package``
-    # is ``None`` and the manual command lives in ``install_hint`` (shown as
-    # guidance; ``install_harness_cli`` refuses to auto-run it).
+    # is ``None`` and the vendor command lives in ``install_hint`` (run by
+    # ``install_harness_cli`` when the setup menu offers "install now").
     GEMINI_FAMILY: HarnessInstallSpec(
         "Antigravity",
         "agy",
@@ -397,23 +399,53 @@ def harness_install_command(key: str) -> list[str]:
     return ["npm", "install", "-g", package]
 
 
+def _ensure_local_bin_on_path() -> None:
+    """Prepend ``~/.local/bin`` to this process's ``PATH`` when missing.
+
+    Vendor curl installers (Hermes, Cursor, Kiro, …) commonly drop the binary
+    there and only amend *shell* config — so without this, a successful install
+    still looks missing until the user restarts the terminal.
+    """
+    local_bin = os.path.join(os.path.expanduser("~"), ".local", "bin")
+    path = os.environ.get("PATH", "")
+    parts = path.split(os.pathsep) if path else []
+    if local_bin not in parts:
+        os.environ["PATH"] = local_bin + (os.pathsep + path if path else "")
+
+
 def install_harness_cli(key: str) -> bool:
-    """Install the harness CLI via npm; return whether it landed on ``PATH``.
+    """Install the harness CLI; return whether it landed on ``PATH``.
 
-    Shells out to :func:`harness_install_command` and re-checks
-    :func:`harness_cli_installed`. Surfaces npm's own output (no capture) so a
-    failing install is visible. Requires ``npm`` on ``PATH``.
+    npm-packaged harnesses shell :func:`harness_install_command`
+    (``npm install -g …``). Curl-/brew-installed harnesses (``package is None``
+    with an ``install_hint``) run that vendor command via ``bash -c`` instead —
+    so setup menus can offer "install now" for Hermes the same way they do for
+    OpenCode. Surfaces the installer's own output (no capture) so a failing
+    install is visible.
 
-    :param key: A harness family or :data:`PI_KEY`.
+    :param key: A harness family or :data:`PI_KEY` / :data:`HERMES_KEY` / ….
     :returns: ``True`` when the CLI is on ``PATH`` after the install attempt
-        (including the no-op case where npm reports success but the binary is
-        present), ``False`` if npm is missing or the install failed.
+        (including the no-op case where the installer reports success but the
+        binary is present), ``False`` if the installer can't run (npm missing
+        for an npm package, no ``install_hint`` for a non-npm CLI) or the
+        install failed.
     :raises KeyError: If *key* has no install spec.
     """
     spec = harness_install_spec(key)
-    if spec is not None and spec.package is None:
-        # Non-npm CLI (e.g. cursor-agent): no auto-install; caller shows install_hint.
-        return False
+    if spec is None:
+        raise KeyError(key)
+    if spec.package is None:
+        hint = spec.install_hint
+        if not hint:
+            return False
+        try:
+            # install_hint is a hardcoded vendor command (e.g. curl | bash), not
+            # user input — bash -c is how the setup menu runs it in-process.
+            subprocess.run(["bash", "-c", hint], check=False, timeout=600)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        _ensure_local_bin_on_path()
+        return harness_cli_installed(key)
     if shutil.which("npm") is None:
         return False
     cmd = harness_install_command(key)

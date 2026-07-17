@@ -38,6 +38,7 @@ from omnigent.cli import (
     _is_run_shorthand,
     _load_global_config,
     _manage_goose_harness,
+    _manage_hermes_harness,
     _manage_kimi_harness,
     _manage_qwen_harness,
     _materialize_harness_launcher_file,
@@ -5324,6 +5325,81 @@ def test_manage_qwen_harness_back_does_not_launch(
     _manage_qwen_harness()
 
     launch.assert_not_called()
+
+
+# ── omnigent setup: Hermes drill-in (_manage_hermes_harness) ─────────────
+
+
+def test_manage_hermes_harness_offers_install_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing hermes CLI shows the OpenCode-style install picker.
+
+    Choosing "Yes — install" runs ``install_harness_cli``; declining returns
+    without reaching the ``hermes model`` menu.
+    """
+    import omnigent.onboarding.harness_install as hi
+    import omnigent.onboarding.interactive as it
+
+    monkeypatch.setattr(hi, "harness_cli_installed", lambda key: False)
+    console = Mock()
+    monkeypatch.setattr(it, "console", console)
+    install = Mock(return_value=False)
+    monkeypatch.setattr(hi, "install_harness_cli", install)
+    # Pick "I'll run it myself" (2) — print the command and return.
+    monkeypatch.setattr(it, "select", lambda *a, **k: 2)
+
+    _manage_hermes_harness()
+
+    install.assert_not_called()
+    printed = " ".join(str(c.args[0]) for c in console.print.call_args_list if c.args)
+    assert "hermes-agent.nousresearch.com/install.sh" in printed
+
+
+def test_manage_hermes_harness_install_now_runs_installer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Choosing "Yes — install" shells the Hermes curl installer."""
+    import omnigent.onboarding.harness_install as hi
+    import omnigent.onboarding.interactive as it
+
+    # Missing until install succeeds; then the post-install menu can open.
+    installed = {"ok": False}
+
+    def _cli_installed(key: str) -> bool:
+        return installed["ok"] if key == hi.HERMES_KEY else False
+
+    def _install(key: str) -> bool:
+        assert key == hi.HERMES_KEY
+        installed["ok"] = True
+        return True
+
+    monkeypatch.setattr(hi, "harness_cli_installed", _cli_installed)
+    monkeypatch.setattr(hi, "install_harness_cli", _install)
+    monkeypatch.setattr(it, "console", Mock())
+    # First select: install offer → Yes (0). Second: Hermes Agent menu → Back (1).
+    choices = iter([0, 1])
+    monkeypatch.setattr(it, "select", lambda *a, **k: next(choices))
+
+    _manage_hermes_harness()
+
+    assert installed["ok"] is True
+
+
+def test_manage_hermes_harness_back_does_not_launch_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the CLI installed, choosing "← Back" exits without ``hermes model``."""
+    import omnigent.onboarding.harness_install as hi
+    import omnigent.onboarding.interactive as it
+
+    monkeypatch.setattr(hi, "harness_cli_installed", lambda key: True)
+    monkeypatch.setattr(it, "console", Mock())
+    # rows = [Run hermes model, ← Back]; pick Back (1). If model were wrongly
+    # launched, the inline ``subprocess.run`` would escape the stubbed select.
+    monkeypatch.setattr(it, "select", lambda *a, **k: 1)
+
+    _manage_hermes_harness()
 
 
 # ── omnigent setup: Goose drill-in (_manage_goose_harness) ───────────────

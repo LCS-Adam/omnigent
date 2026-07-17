@@ -152,20 +152,80 @@ def test_install_command_rejects_non_npm_harness() -> None:
         hi.harness_install_command(hi.KIRO_KEY)
 
 
-def test_install_harness_cli_noop_for_non_npm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``install_harness_cli`` never shells npm for a non-npm CLI.
+def test_hermes_install_spec_is_curl_installer_no_npm() -> None:
+    """Hermes ships via Nous Research's curl installer (no npm package)."""
+    spec = hi.harness_install_spec(hi.HERMES_KEY)
+    assert spec is not None
+    assert spec.display == "Hermes"
+    assert spec.binary == "hermes"
+    assert spec.package is None
+    assert spec.install_hint == (
+        "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
+    )
 
-    It returns ``False`` without spawning anything, so the menu falls back to
-    the manual ``install_hint`` rather than running a bogus npm command.
+
+def test_install_harness_cli_runs_shell_hint_for_non_npm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-npm CLIs install via ``bash -c <install_hint>``, not ``npm``.
+
+    Setup menus (Hermes, …) offer "install now" the same way OpenCode does for
+    npm packages; this is the shared install path those menus call.
     """
-    monkeypatch.setattr(hi.shutil, "which", lambda name: f"/usr/bin/{name}")
+    calls: list[list[str]] = []
+    state = {"installed": False}
+
+    def _which(name: str) -> str | None:
+        if name == "hermes":
+            return "/home/x/.local/bin/hermes" if state["installed"] else None
+        return None
+
+    def _run(argv: list[str], *, check: bool = False, timeout: float | None = None):
+        calls.append(argv)
+        state["installed"] = True
+        return subprocess.CompletedProcess(args=argv, returncode=0)
+
+    monkeypatch.setattr(hi.shutil, "which", _which)
+    monkeypatch.setattr(hi.subprocess, "run", _run)
+
+    assert hi.install_harness_cli(hi.HERMES_KEY) is True
+    assert len(calls) == 1
+    assert calls[0][:2] == ["bash", "-c"]
+    assert "hermes-agent.nousresearch.com/install.sh" in calls[0][2]
+    # Never an npm argv for a curl-installed harness.
+    assert all(c[0] != "npm" for c in calls)
+
+
+def test_install_harness_cli_shell_hint_missing_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shell installer that leaves the binary off PATH reports failure."""
+    monkeypatch.setattr(hi.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        hi.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(args=a[0], returncode=0),
+    )
+    assert hi.install_harness_cli(hi.HERMES_KEY) is False
+
+
+def test_install_harness_cli_no_hint_returns_false_without_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A package-less spec with no ``install_hint`` is a no-op (no spawn)."""
+    from omnigent.harness_install_spec import HarnessInstallSpec
+
+    monkeypatch.setitem(
+        hi._HARNESS_INSTALL,
+        "no-hint",
+        HarnessInstallSpec("NoHint", "nohint", package=None, install_hint=None),
+    )
 
     def _explode(*a: object, **k: object) -> None:
-        raise AssertionError("npm install spawned for a non-npm harness")
+        raise AssertionError("subprocess.run spawned despite no install_hint")
 
     monkeypatch.setattr(hi.subprocess, "run", _explode)
-    assert hi.install_harness_cli(hi.CURSOR_KEY) is False
-    assert hi.install_harness_cli(hi.KIRO_KEY) is False
+    assert hi.install_harness_cli("no-hint") is False
 
 
 def test_unknown_key_has_no_spec_and_is_not_installed() -> None:
