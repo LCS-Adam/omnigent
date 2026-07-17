@@ -193,9 +193,15 @@ def test_process_alive_false_for_bogus_pid() -> None:
 
 def test_terminate_tree_stops_the_process() -> None:
     proc = subprocess.Popen(_spin_cmd(), **_proc.spawn_kwargs())
+    # Bind to the live PID so psutil pins its creation time; a recycled PID
+    # after teardown can't masquerade as the reaped child, so the final
+    # liveness check is free of the process_alive(pid) TOCTOU race.
+    handle = psutil.Process(proc.pid)
     _proc.terminate_tree(proc, grace=5)
     proc.wait(timeout=5)
-    assert _proc.process_alive(proc.pid) is False
+    # A reaped PID raises NoSuchProcess, which also means it isn't running.
+    with contextlib.suppress(psutil.NoSuchProcess):
+        assert not handle.is_running() or handle.status() == psutil.STATUS_ZOMBIE
 
 
 # --------------------------------------------------------------------------
