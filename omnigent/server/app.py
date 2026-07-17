@@ -2177,6 +2177,58 @@ def create_app(
     )
 
     # ── Tunnel lifecycle callbacks (Step 8.5 crash recovery) ───
+
+    # How long to wait after a runner tunnel drops before clearing its
+    # runner_id DB binding. A runner that reconnects within this window
+    # keeps its binding; only genuinely dead runners get unbound so
+    # their sessions can self-heal on the next resume attempt.
+    _RUNNER_STALE_BINDING_GRACE_S: float = float(
+        os.environ.get("OMNIGENT_RUNNER_STALE_BINDING_GRACE_S", "60")
+    )
+    # Strong refs to in-flight stale-binding-clear tasks; asyncio only keeps
+    # weak refs so an unreferenced task can be GC'd before it fires.
+    _stale_binding_tasks: set[asyncio.Task[None]] = set()
+
+    async def _deferred_clear_runner_binding(runner_id: str) -> None:
+        """After a grace period, clear the runner_id for sessions still
+        bound to a disconnected runner.
+
+        If the runner reconnects within the grace window its tunnel
+        re-registers and the liveness check below short-circuits, so
+        transient WebSocket blips do not unbind live sessions.
+
+        :param runner_id: The disconnected runner's id.
+        """
+        await asyncio.sleep(_RUNNER_STALE_BINDING_GRACE_S)
+        # If the runner reconnected during the grace window, abort.
+        if tunnel_registry.get(runner_id) is not None:
+            _logger.info(
+                "Runner %s reconnected within grace window; skipping stale binding clear",
+                runner_id,
+            )
+            return
+        affected = await asyncio.to_thread(
+            conversation_store.list_conversations_by_runner_id, runner_id
+        )
+        if not affected:
+            return
+        _logger.warning(
+            "Runner %s still offline after %.0fs; clearing runner_id for %d session(s)",
+            runner_id,
+            _RUNNER_STALE_BINDING_GRACE_S,
+            len(affected),
+        )
+        for conv in affected:
+            try:
+                await asyncio.to_thread(conversation_store.clear_runner_id, conv.id)
+                _logger.info(
+                    "Cleared stale runner binding for session %s (was runner %s)",
+                    conv.id,
+                    runner_id,
+                )
+            except Exception:
+                _logger.exception("Failed to clear stale runner binding for session %s", conv.id)
+
     async def _on_runner_disconnect(runner_id: str) -> None:
         """Mark sessions pinned to *this* runner as offline.
 
@@ -2235,6 +2287,15 @@ def create_app(
         for session_id in affected:
             _session_status_cache[session_id] = "failed"
             _publish_status(session_id, "failed")
+
+        # Schedule deferred binding clear so sessions become rebindable
+        # if the runner stays offline past the grace period.
+        task = asyncio.create_task(
+            _deferred_clear_runner_binding(runner_id),
+            name=f"stale-binding-clear:{runner_id}",
+        )
+        _stale_binding_tasks.add(task)
+        task.add_done_callback(_stale_binding_tasks.discard)
 
     async def _on_runner_exited(runner_id: str, error: str) -> None:
         """Mark a crashed runner's session(s) failed and push the cause.
