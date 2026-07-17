@@ -482,7 +482,7 @@ _LOGIN_REDIRECT_FATAL_ATTEMPTS = 3
 # A small number of retries lets the Databricks SDK auth factory refresh its
 # token (which happens inside _build_auth_headers on each reconnect) and
 # handles transient server-side auth hiccups without looping indefinitely.
-_MAX_CONSECUTIVE_401S = 3
+_MAX_CONSECUTIVE_AUTH_ERRORS = 3
 
 
 class HostConnectError(Exception):
@@ -659,10 +659,10 @@ class HostProcess:
         self._ever_connected = False
         # Consecutive login-page redirects; reset by a successful upgrade.
         self._login_redirect_streak = 0
-        # Consecutive HTTP 401 responses; reset on a successful upgrade.
-        # A run of 401s may be a transient auth blip or a token the Databricks
-        # SDK can refresh — allow a few retries before declaring fatal.
-        self._consecutive_401s = 0
+        # Consecutive HTTP 401/403 auth rejections; reset on a successful upgrade
+        # or any non-auth failure. Auth failures may be transient or refreshable
+        # (the Databricks SDK can mint a fresh token on the next reconnect).
+        self._consecutive_auth_errors = 0
         # Live tunnel connection, set by _serve_frames for the watcher
         # tasks (which outlive any single connection) to report on.
         self._ws: websockets.asyncio.client.ClientConnection | None = None
@@ -1001,34 +1001,39 @@ class HostProcess:
         """
         if status in _RETRYABLE_UPGRADE_STATUSES or not (400 <= status < 500):
             return None
-        if status == 401:
-            self._consecutive_401s += 1
+        if status in {401, 403}:
+            self._consecutive_auth_errors += 1
             # Allow a handful of retries: the Databricks SDK auth factory can
             # refresh its token on the next _build_auth_headers call, and a
             # transient server-side auth hiccup may clear on its own. After
-            # _MAX_CONSECUTIVE_401S attempts we give up and fail permanent.
-            if self._consecutive_401s < _MAX_CONSECUTIVE_401S:
+            # _MAX_CONSECUTIVE_AUTH_ERRORS attempts we give up and fail fatal.
+            if self._consecutive_auth_errors < _MAX_CONSECUTIVE_AUTH_ERRORS:
                 _logger.warning(
-                    "Host tunnel rejected with HTTP 401 (attempt %d/%d); "
+                    "Host tunnel rejected with HTTP %d (attempt %d/%d); "
                     "refreshing credentials and retrying. %s",
-                    self._consecutive_401s,
-                    _MAX_CONSECUTIVE_401S,
+                    status,
+                    self._consecutive_auth_errors,
+                    _MAX_CONSECUTIVE_AUTH_ERRORS,
                     self._credentials_fix_hint(),
                 )
                 return None  # retryable — reconnect loop will refresh headers
+            n = self._consecutive_auth_errors
+            if status == 401:
+                return HostConnectError(
+                    f"Authentication failed (HTTP 401) after {n} attempts: "
+                    "the server consistently rejected the supplied credentials. "
+                    + self._credentials_fix_hint()
+                    + " "
+                    + self._login_fix_hint()
+                )
             return HostConnectError(
-                f"Authentication failed (HTTP 401) after {self._consecutive_401s} "
-                "attempts: the server consistently rejected the supplied "
-                "credentials. " + self._credentials_fix_hint() + " " + self._login_fix_hint()
-            )
-        if status == 403:
-            return HostConnectError(
-                "Connection refused (HTTP 403): the credentials authenticated, "
-                "but the server did not accept the host tunnel. Either your "
-                "identity is not authorized to register a host on this server, "
-                "or the server is running a build that predates the host API "
-                "(the /v1/hosts tunnel route). Confirm you have access and that "
-                "the server is up to date, then retry. " + self._login_fix_hint()
+                f"Connection refused (HTTP 403) after {n} attempts: "
+                "the credentials authenticated, but the server did not accept "
+                "the host tunnel. Either your identity is not authorized to "
+                "register a host on this server, or the server is running a "
+                "build that predates the host API (/v1/hosts tunnel route). "
+                "Confirm you have access and that the server is up to date, "
+                "then retry. " + self._login_fix_hint()
             )
         if status == 409:
             return HostConnectError(
@@ -1670,6 +1675,17 @@ class HostProcess:
                         # riding out a messy restart isn't killed by
                         # redirects accumulated across unrelated errors.
                         self._login_redirect_streak = 0
+                    # Non-auth failures (5xx, network drop, mid-serve
+                    # disconnect) also reset the auth error counter —
+                    # _consecutive_auth_errors counts CONSECUTIVE
+                    # rejections only. Auth-error InvalidStatus exceptions
+                    # are NOT reset here; they already incremented the
+                    # counter in _classify_http_status and must accumulate.
+                    is_auth_rejection = isinstance(
+                        exc, InvalidStatus
+                    ) and exc.response.status_code in {401, 403}
+                    if not is_auth_rejection:
+                        self._consecutive_auth_errors = 0
                     # Classify the disconnect to choose a reconnect cadence.
                     #
                     # 1012 "service restart" / 1001 "going away" are explicit
@@ -1779,7 +1795,7 @@ class HostProcess:
         # from here on are server restarts, not an unauthenticated host.
         self._ever_connected = True
         self._login_redirect_streak = 0
-        self._consecutive_401s = 0
+        self._consecutive_auth_errors = 0
         try:
             await self._serve_frames(ws)
         finally:
