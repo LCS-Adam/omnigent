@@ -21871,9 +21871,7 @@ def create_sessions_router(
             )
 
         if method == "tools/call":
-            _mcp_conv = await asyncio.to_thread(
-                conversation_store.get_conversation, session_id
-            )
+            _mcp_conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             turn_actor = _mcp_conv.labels.get(_TURN_ACTOR_LABEL) if _mcp_conv else None
             return await _handle_mcp_tools_call(
                 rpc_id,
