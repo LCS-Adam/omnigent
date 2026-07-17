@@ -2238,13 +2238,18 @@ async def test_connected_host_retries_login_redirects_indefinitely(
 async def test_run_fails_loud_on_permanent_4xx(
     monkeypatch: pytest.MonkeyPatch, status: int, expected: str
 ) -> None:
-    """A permanent 4xx upgrade rejection fails loud on the first attempt.
+    """A permanent 4xx upgrade rejection eventually fails loud.
 
-    401/403/other-4xx mean unauthenticated / unauthorized / wrong-or-old
-    server — reconnecting can never succeed, so run() must raise
-    HostConnectError immediately rather than backing off.
+    404 and other non-auth 4xx fail immediately (1 attempt).
+    401/403 are given _MAX_CONSECUTIVE_AUTH_ERRORS retries so the
+    Databricks SDK auth factory can mint a fresh token; after exhausting
+    them run() raises HostConnectError.
     """
-    spy = _ConnectSpy([_invalid_status(status)])
+    from omnigent.host.connect import _MAX_CONSECUTIVE_AUTH_ERRORS
+
+    is_auth = status in {401, 403}
+    n = _MAX_CONSECUTIVE_AUTH_ERRORS if is_auth else 1
+    spy = _ConnectSpy([_invalid_status(status)] * n)
     _patch_connect(monkeypatch, spy)
     host = _host()
 
@@ -2253,9 +2258,8 @@ async def test_run_fails_loud_on_permanent_4xx(
 
     # Message identifies the specific permanent failure.
     assert expected in str(excinfo.value)
-    # Exactly one attempt → no silent reconnect/backoff. If >1, the 4xx
-    # was misclassified as transient and the loop kept retrying.
-    assert spy.call_count == 1
+    # Auth errors retry up to the limit; other 4xx fail on the first attempt.
+    assert spy.call_count == n
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -2270,8 +2274,10 @@ async def test_auth_rejection_suggests_omnigent_login(
     fatal message must name the exact remedy command, including the
     server URL, so the user can copy-paste it.
     """
+    from omnigent.host.connect import _MAX_CONSECUTIVE_AUTH_ERRORS
+
     server_url = "https://app.example.databricks.com"
-    spy = _ConnectSpy([_invalid_status(status)])
+    spy = _ConnectSpy([_invalid_status(status)] * _MAX_CONSECUTIVE_AUTH_ERRORS)
     _patch_connect(monkeypatch, spy)
     host = _host(server_url=server_url)
 
