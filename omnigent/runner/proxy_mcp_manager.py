@@ -60,7 +60,6 @@ class ProxyMcpManager:
         session_id: str,
         ap_client: httpx.AsyncClient,
         publish_event: Callable[[str, dict[str, Any]], None] | None = None,
-        turn_actor: str | None = None,
     ) -> None:
         """Create a proxy manager bound to one session.
 
@@ -72,14 +71,10 @@ class ProxyMcpManager:
             when the user decides (keeps the approval-badge counter in
             sync).  Pass ``None`` only in test contexts where the badge
             is irrelevant.
-        :param turn_actor: Email of the human who initiated the turn,
-            forwarded to the server so MCP proxy policy gates on the
-            correct identity rather than the runner's service account.
         """
         self._session_id = session_id
         self._omnigent_client = ap_client
         self._publish_event = publish_event
-        self._turn_actor = turn_actor
 
     @property
     def _mcp_url(self) -> str:
@@ -217,7 +212,6 @@ class ProxyMcpManager:
             "id": 1,
             "method": "tools/call",
             "params": {"name": tool_name, "arguments": arguments},
-            **({"actor": {"run_as": self._turn_actor}} if self._turn_actor else {}),
         }
 
         # At most two iterations: initial call + one approval retry.

@@ -516,18 +516,17 @@ async def test_evaluate_endpoint_passes_actor_to_policy(
     assert body["reason"] == "Blocked user"
 
 
-async def test_evaluate_runner_supplied_actor_overrides_request_user_id(
+async def test_evaluate_server_stashed_turn_actor_overrides_request_user_id(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    When the runner includes ``event.context.actor`` in the evaluate
-    payload, that identity is used for policy evaluation instead of the
-    HTTP request's ``user_id`` (the runner's service-account credential).
+    When the server has stashed a turn-initiating actor for the session
+    (set at forward time from the human's verified ``created_by``), that
+    identity is used for policy evaluation instead of the HTTP request's
+    ``user_id`` (the runner's service-account credential).
 
-    Verifies the fix for shared multi-user sessions where the runner
-    authenticates as a service account but the policy should gate on
-    the human who triggered the turn.
+    No actor field in the request body is needed or trusted.
     """
     policy = FunctionPolicySpec(
         name="admin__deny_blocked_actor",
@@ -551,7 +550,57 @@ async def test_evaluate_runner_supplied_actor_overrides_request_user_id(
     agent = await create_test_agent(client)
     session_id = await _create_session(client, agent["id"])
 
-    # Runner supplies the turn-initiating human's identity in event.context.actor.
+    # Simulate the server stashing the turn-initiating human's identity at
+    # forward time (normally set by _forward_event_to_runner).
+    from omnigent.server.routes import sessions as sessions_mod
+
+    sessions_mod._session_turn_actor[session_id] = "blocked@test.com"
+    monkeypatch.setitem(sessions_mod._session_turn_actor, session_id, "blocked@test.com")
+
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/policies/evaluate",
+        json=_tool_call_request("Read"),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == "POLICY_ACTION_DENY", (
+        "server-stashed turn actor should override the request user_id"
+    )
+    assert body["reason"] == "Blocked user"
+
+
+async def test_evaluate_body_actor_field_is_ignored(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A caller cannot spoof the policy actor by injecting ``context.actor``
+    into the event payload — the body field is ignored; only the
+    server-stashed turn actor (or the request ``user_id``) is used.
+    """
+    policy = FunctionPolicySpec(
+        name="admin__deny_blocked_actor",
+        on=None,
+        function=FunctionRef(path=f"{__name__}._deny_blocked_actor"),
+    )
+    original_caps = get_caps()
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.get_caps",
+        lambda: RuntimeCaps(
+            execution_timeout=original_caps.execution_timeout,
+            default_policies=[policy],
+        ),
+    )
+    # HTTP request is unauthenticated; no turn actor stashed server-side.
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._get_user_id",
+        lambda _req, _auth: None,
+    )
+
+    agent = await create_test_agent(client)
+    session_id = await _create_session(client, agent["id"])
+
+    # Caller tries to spoof actor via the event context body field.
     payload = _tool_call_request("Read")
     payload["event"]["context"] = {"actor": {"run_as": "blocked@test.com"}}
 
@@ -560,21 +609,19 @@ async def test_evaluate_runner_supplied_actor_overrides_request_user_id(
         json=payload,
     )
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["result"] == "POLICY_ACTION_DENY", (
-        "runner-supplied context.actor should override the request user_id"
+    # Policy should NOT fire — the body field is ignored, actor is None.
+    assert resp.json()["result"] == "POLICY_ACTION_ALLOW", (
+        "body-injected context.actor must not influence the policy actor"
     )
-    assert body["reason"] == "Blocked user"
 
 
-async def test_evaluate_falls_back_to_request_user_id_when_no_context_actor(
+async def test_evaluate_falls_back_to_request_user_id_when_no_turn_actor(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    When the runner does not supply ``event.context.actor``, the HTTP
-    request's ``user_id`` is used as before — no regression for callers
-    that do not send a context actor.
+    When no turn actor is stashed (direct API callers, no-auth mode),
+    the HTTP request's ``user_id`` is used — no regression.
     """
     policy = FunctionPolicySpec(
         name="admin__deny_blocked_actor",
@@ -597,7 +644,6 @@ async def test_evaluate_falls_back_to_request_user_id_when_no_context_actor(
     agent = await create_test_agent(client)
     session_id = await _create_session(client, agent["id"])
 
-    # No context.actor in the payload — request user_id should be used.
     resp = await client.post(
         f"/v1/sessions/{session_id}/policies/evaluate",
         json=_tool_call_request("Read"),

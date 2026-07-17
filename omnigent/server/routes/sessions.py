@@ -1253,6 +1253,12 @@ _pending_policy_ask_writes: cachetools.LRUCache[str, _PendingPolicyAskWrites] = 
     cachetools.LRUCache(maxsize=512)
 )
 
+# conversation_id -> email of the human who initiated the current turn, set
+# server-side when the event is forwarded to the runner so the policy-evaluate
+# and MCP-proxy endpoints can gate on the human rather than the runner's
+# service-account credential without trusting anything from the request body.
+_session_turn_actor: dict[str, str | None] = {}
+
 
 # (conversation_id, deciding_policy) -> lock serializing native ASK gates.
 # When an agent fires several tool calls in parallel, each spawns its own
@@ -9380,6 +9386,10 @@ async def _forward_event_to_runner(
         "persisted_item_id": persisted_items[0].id,
         **({"created_by": created_by} if created_by else {}),
     }
+    # Stash the turn-initiating human's identity server-side so policy
+    # evaluate and MCP proxy endpoints can gate on the correct actor
+    # without trusting any field from the runner's request body.
+    _session_turn_actor[session_id] = created_by
     # Forward request-supplied client-side tool schemas so non-native
     # harnesses can emit (and tunnel) the caller's tools — the runner
     # merges these into the harness tool list (_merge_request_client_tools).
@@ -17089,11 +17099,13 @@ def create_sessions_router(
             )
 
         engine = _build_engine()
-        # Prefer actor supplied by the runner (carries the turn-initiating
-        # user's identity) over the HTTP request's service-account identity.
-        context_actor = (event.get("context") or {}).get("actor")
-        actor = context_actor if isinstance(context_actor, dict) else _build_actor(user_id)
-        ctx = _build_evaluation_context(phase, data, event, actor=actor)
+        # Use the turn-initiating human's identity (stashed server-side at
+        # forward time) so per-user policies gate on the correct actor even
+        # when the HTTP caller is the runner's service-account credential.
+        turn_actor = _session_turn_actor.get(session_id)
+        ctx = _build_evaluation_context(
+            phase, data, event, actor=_build_actor(turn_actor or user_id)
+        )
         result = await engine.evaluate(ctx, read_only=is_read_only)
 
         # URL-based elicitation for blocking phases: on a TOOL_CALL or
@@ -21852,10 +21864,7 @@ def create_sessions_router(
             )
 
         if method == "tools/call":
-            # Prefer actor forwarded by the runner (the turn-initiating user's
-            # identity) over the HTTP request's service-account identity.
-            body_actor = body.get("actor")
-            mcp_actor = body_actor if isinstance(body_actor, dict) else _build_actor(user_id)
+            turn_actor = _session_turn_actor.get(session_id)
             return await _handle_mcp_tools_call(
                 rpc_id,
                 session_id,
@@ -21863,7 +21872,7 @@ def create_sessions_router(
                 conversation_store,
                 agent_store,
                 runner_router,
-                actor=mcp_actor,
+                actor=_build_actor(turn_actor or user_id),
                 request=request,
             )
 
