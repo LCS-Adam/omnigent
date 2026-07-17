@@ -2570,9 +2570,13 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
             timeout=10.0,
         )
         if retry.status_code == 200:
-            # SDK refreshed the token successfully — the tunnel and session
-            # API calls will pick it up via _build_auth_headers / _remote_headers
-            # which call _make_auth_token_factory fresh each time.
+            # SDK refreshed the token. Persist the Databricks pointer so
+            # all downstream auth paths (_remote_headers, _build_auth_headers,
+            # _make_auth_token_factory) resolve the same workspace host
+            # rather than falling through to a stale stored OIDC token.
+            from omnigent.cli_auth import store_databricks_auth
+
+            store_databricks_auth(server, workspace_host, org_id=org_id)
             return
     login_cmd = f"omnigent login {server}"
     if non_interactive or not sys.stdin.isatty():

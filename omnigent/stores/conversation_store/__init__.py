@@ -1041,6 +1041,24 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def clear_runner_id_if_still_bound(
+        self, conversation_id: str, expected_runner_id: str
+    ) -> bool:
+        """Atomically clear ``runner_id`` only if it still equals *expected_runner_id*.
+
+        Used by the deferred stale-binding clear to avoid wiping a
+        legitimately rebound session: if the session was reassigned to a
+        live runner during the grace window, this is a no-op.
+
+        :param conversation_id: Session identifier.
+        :param expected_runner_id: The offline runner's id; the clear
+            is skipped when the row already carries a different value.
+        :returns: ``True`` when the row was updated, ``False`` when the
+            binding had already changed (no-op).
+        """
+        ...
+
+    @abstractmethod
     def clear_host_binding(self, conversation_id: str) -> Conversation:
         """
         Revert a session to fully unbound: NULL ``host_id``,

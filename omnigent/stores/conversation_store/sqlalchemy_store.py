@@ -2655,6 +2655,40 @@ class SqlAlchemyConversationStore(ConversationStore):
             )
         return conv
 
+    def clear_runner_id_if_still_bound(
+        self, conversation_id: str, expected_runner_id: str
+    ) -> bool:
+        """Atomically clear ``runner_id`` only when it still equals *expected_runner_id*.
+
+        A conditional UPDATE avoids the list→clear TOCTOU race: if the
+        session was rebound to a live runner during the grace window,
+        the WHERE clause misses and the call is a no-op.
+
+        :param conversation_id: Session identifier.
+        :param expected_runner_id: The offline runner's id.
+        :returns: ``True`` when the row was updated, ``False`` when the
+            binding had already changed.
+        """
+        from sqlalchemy import update
+
+        with self._session() as session:
+            result = session.execute(
+                update(SqlConversationMetadata)
+                .where(
+                    SqlConversationMetadata.workspace == current_workspace_id(),
+                    SqlConversationMetadata.id == conversation_id,
+                    SqlConversationMetadata.runner_id == expected_runner_id,
+                )
+                .values(runner_id=None)
+            )
+        if result.rowcount == 0:
+            return False
+        with self._conv_session() as ap_sess:
+            ap_row = ap_sess.get(SqlConversation, (current_workspace_id(), conversation_id))
+            if ap_row is not None:
+                ap_row.updated_at = now_epoch()
+        return True
+
     def clear_host_binding(self, conversation_id: str) -> Conversation:
         """
         NULL ``host_id``/``workspace``/``git_branch``/``runner_id`` together.
