@@ -1253,14 +1253,11 @@ _pending_policy_ask_writes: cachetools.LRUCache[str, _PendingPolicyAskWrites] = 
     cachetools.LRUCache(maxsize=512)
 )
 
-# conversation_id -> email of the human who initiated the current turn.
-# Written server-side at _forward_event_to_runner time; read by the
-# policy-evaluate and MCP-proxy endpoints so per-user policies gate on
-# the correct actor rather than the runner's service-account credential.
-# Only updated when created_by is non-None — system-driven forwards
-# (sub-agent results, parent-wake) have no human sender and must not
-# stomp the stash mid-turn. LRU-bounded to cap per-process footprint.
-_session_turn_actor: cachetools.LRUCache[str, str] = cachetools.LRUCache(maxsize=1024)
+# Label key used to persist the turn-initiating human's identity on the
+# conversation row.  Written at _forward_event_to_runner time so any
+# server replica can read it back when the runner calls /policies/evaluate
+# or /mcp (tools/call).
+_TURN_ACTOR_LABEL = "omnigent.turn_actor"
 
 
 # (conversation_id, deciding_policy) -> lock serializing native ASK gates.
@@ -9389,14 +9386,17 @@ async def _forward_event_to_runner(
         "persisted_item_id": persisted_items[0].id,
         **({"created_by": created_by} if created_by else {}),
     }
-    # Stash the turn-initiating human's identity server-side so policy
-    # evaluate and MCP proxy endpoints can gate on the correct actor
-    # without trusting any field from the runner's request body.
-    # Only update on a real human sender — system-driven forwards
-    # (sub-agent results, parent-wake) carry created_by=None and must
-    # not overwrite the identity mid-turn.
+    # Persist the turn-initiating human's identity on the conversation row
+    # so any server replica can read it back when the runner calls
+    # /policies/evaluate or /mcp (tools/call).  System-driven forwards
+    # (sub-agent results, parent-wake) carry created_by=None and must not
+    # overwrite the identity mid-turn.
     if created_by is not None:
-        _session_turn_actor[session_id] = created_by
+        await asyncio.to_thread(
+            conversation_store.set_labels,
+            session_id,
+            {_TURN_ACTOR_LABEL: created_by},
+        )
     # Forward request-supplied client-side tool schemas so non-native
     # harnesses can emit (and tunnel) the caller's tools — the runner
     # merges these into the harness tool list (_merge_request_client_tools).
@@ -17106,10 +17106,10 @@ def create_sessions_router(
             )
 
         engine = _build_engine()
-        # Use the turn-initiating human's identity (stashed server-side at
-        # forward time) so per-user policies gate on the correct actor even
-        # when the HTTP caller is the runner's service-account credential.
-        turn_actor = _session_turn_actor.get(session_id)
+        # Use the turn-initiating human's identity (persisted at forward time)
+        # so per-user policies gate on the correct actor even when the HTTP
+        # caller is the runner's service-account credential.
+        turn_actor = conv.labels.get(_TURN_ACTOR_LABEL)
         ctx = _build_evaluation_context(
             phase, data, event, actor=_build_actor(turn_actor or user_id)
         )
@@ -21871,7 +21871,10 @@ def create_sessions_router(
             )
 
         if method == "tools/call":
-            turn_actor = _session_turn_actor.get(session_id)
+            _mcp_conv = await asyncio.to_thread(
+                conversation_store.get_conversation, session_id
+            )
+            turn_actor = _mcp_conv.labels.get(_TURN_ACTOR_LABEL) if _mcp_conv else None
             return await _handle_mcp_tools_call(
                 rpc_id,
                 session_id,

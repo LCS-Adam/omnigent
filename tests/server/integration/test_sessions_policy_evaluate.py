@@ -550,11 +550,16 @@ async def test_evaluate_server_stashed_turn_actor_overrides_request_user_id(
     agent = await create_test_agent(client)
     session_id = await _create_session(client, agent["id"])
 
-    # Simulate the server stashing the turn-initiating human's identity at
-    # forward time (normally set by _forward_event_to_runner).
-    from omnigent.server.routes import sessions as sessions_mod
+    # Simulate the server persisting the turn-initiating human's identity
+    # (normally written by _forward_event_to_runner via set_labels).
+    from omnigent.runtime import get_conversation_store
+    from omnigent.server.routes.sessions import _TURN_ACTOR_LABEL
 
-    monkeypatch.setitem(sessions_mod._session_turn_actor, session_id, "blocked@test.com")
+    await asyncio.to_thread(
+        get_conversation_store().set_labels,
+        session_id,
+        {_TURN_ACTOR_LABEL: "blocked@test.com"},
+    )
 
     resp = await client.post(
         f"/v1/sessions/{session_id}/policies/evaluate",
@@ -563,7 +568,7 @@ async def test_evaluate_server_stashed_turn_actor_overrides_request_user_id(
     assert resp.status_code == 200
     body = resp.json()
     assert body["result"] == "POLICY_ACTION_DENY", (
-        "server-stashed turn actor should override the request user_id"
+        "persisted turn actor label should override the request user_id"
     )
     assert body["reason"] == "Blocked user"
 
