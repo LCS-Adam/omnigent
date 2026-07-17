@@ -2408,11 +2408,22 @@ async def _maybe_mirror_external_session_id(
         # overwrite conflict or schema validation). Retrying won't
         # help; latch off and let the operator see the log.
         if 400 <= exc.response.status_code < 500:
+            # The server rejected overwriting an existing binding.
+            # Fetch the real bound value so operators can identify
+            # which session still holds the context.
+            _bound_sid: str | None = None
+            try:
+                _snap = await _fetch_session_snapshot(client=client, session_id=session_id)
+                _bound_sid = _snap.get("external_session_id") if isinstance(_snap, dict) else None
+            except Exception:  # noqa: BLE001
+                pass
             _logger.warning(
-                "AP rejected external_session_id PATCH (%s); session=%s claude_sid=%s",
+                "AP rejected external_session_id PATCH (%s); session=%s "
+                "rejected_claude_sid=%s server_bound_claude_sid=%s",
                 exc.response.status_code,
                 session_id,
                 claude_sid,
+                _bound_sid,
             )
             return True
         _logger.warning(

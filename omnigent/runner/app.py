@@ -5563,6 +5563,25 @@ async def _auto_create_claude_terminal(
                 session_id,
             )
 
+    # The server GET may miss the external_session_id binding when the
+    # reconnect request arrives without a workspace-scoped context (the
+    # ContextVar defaults to 0 on fresh tasks). If the previous launch on
+    # this host recorded a claude_session_id in the bridge state, use it
+    # as a resume hint — the PATCH will confirm or conflict, which is still
+    # better than silently discarding the user's session context.
+    if session_external_id is None:
+        from omnigent.claude_native_bridge import read_claude_session_id as _read_csid
+
+        _local_sid = _read_csid(bridge_dir)
+        if _local_sid is not None:
+            session_external_id = _local_sid
+            _logger.info(
+                "cold-resume fallback: server snapshot missing external_session_id, "
+                "using local bridge hint: session=%s local_claude_sid=%s",
+                session_id,
+                _local_sid,
+            )
+
     # Cold resume: when this session wraps a prior Claude session,
     # synthesize the local ``~/.claude/projects/<workspace>/<sid>.jsonl``
     # transcript that Claude's ``--resume`` reads, then pass ``--resume``.
