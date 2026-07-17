@@ -516,6 +516,98 @@ async def test_evaluate_endpoint_passes_actor_to_policy(
     assert body["reason"] == "Blocked user"
 
 
+async def test_evaluate_runner_supplied_actor_overrides_request_user_id(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    When the runner includes ``event.context.actor`` in the evaluate
+    payload, that identity is used for policy evaluation instead of the
+    HTTP request's ``user_id`` (the runner's service-account credential).
+
+    Verifies the fix for shared multi-user sessions where the runner
+    authenticates as a service account but the policy should gate on
+    the human who triggered the turn.
+    """
+    policy = FunctionPolicySpec(
+        name="admin__deny_blocked_actor",
+        on=None,
+        function=FunctionRef(path=f"{__name__}._deny_blocked_actor"),
+    )
+    original_caps = get_caps()
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.get_caps",
+        lambda: RuntimeCaps(
+            execution_timeout=original_caps.execution_timeout,
+            default_policies=[policy],
+        ),
+    )
+    # HTTP request carries the runner's service-account identity.
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._get_user_id",
+        lambda _req, _auth: "runner-svc@example.com",
+    )
+
+    agent = await create_test_agent(client)
+    session_id = await _create_session(client, agent["id"])
+
+    # Runner supplies the turn-initiating human's identity in event.context.actor.
+    payload = _tool_call_request("Read")
+    payload["event"]["context"] = {"actor": {"run_as": "blocked@test.com"}}
+
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/policies/evaluate",
+        json=payload,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == "POLICY_ACTION_DENY", (
+        "runner-supplied context.actor should override the request user_id"
+    )
+    assert body["reason"] == "Blocked user"
+
+
+async def test_evaluate_falls_back_to_request_user_id_when_no_context_actor(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    When the runner does not supply ``event.context.actor``, the HTTP
+    request's ``user_id`` is used as before — no regression for callers
+    that do not send a context actor.
+    """
+    policy = FunctionPolicySpec(
+        name="admin__deny_blocked_actor",
+        on=None,
+        function=FunctionRef(path=f"{__name__}._deny_blocked_actor"),
+    )
+    original_caps = get_caps()
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.get_caps",
+        lambda: RuntimeCaps(
+            execution_timeout=original_caps.execution_timeout,
+            default_policies=[policy],
+        ),
+    )
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._get_user_id",
+        lambda _req, _auth: "blocked@test.com",
+    )
+
+    agent = await create_test_agent(client)
+    session_id = await _create_session(client, agent["id"])
+
+    # No context.actor in the payload — request user_id should be used.
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/policies/evaluate",
+        json=_tool_call_request("Read"),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == "POLICY_ACTION_DENY"
+    assert body["reason"] == "Blocked user"
+
+
 # ── Native ASK gate (URL-based elicitation) ──────────────────
 
 
