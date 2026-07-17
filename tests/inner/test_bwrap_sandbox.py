@@ -1517,6 +1517,7 @@ def test_run_launcher_spawn_wrap_private_tmpdir_boots_under_bwrap(tmp_path: Path
     # inline re-exec can import ``omnigent.inner``.
     policy = _make_policy(
         cwd,
+        allow_hidden=[".venv"],
         read_roots=[_project_root()],
         cwd_hidden_scan_overflow="warn",
     )
