@@ -9385,11 +9385,8 @@ async def _forward_event_to_runner(
         # resolved copy — id-based dedup, not a role/content guess.
         "persisted_item_id": persisted_items[0].id,
     }
-    # Persist the turn-initiating human's identity on the conversation row
-    # so any server replica can read it back when the runner calls
-    # /policies/evaluate or /mcp (tools/call).  System-driven forwards
-    # (sub-agent results, parent-wake) carry created_by=None and must not
-    # overwrite the identity mid-turn.
+    # Skip system-driven forwards (sub-agent results, parent-wake carry
+    # created_by=None) — they must not stomp the in-flight turn's actor.
     if created_by is not None:
         await asyncio.to_thread(
             conversation_store.set_labels,
@@ -12739,15 +12736,12 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
     :param labels: The client-supplied label mapping, or ``None``.
     :raises OmnigentError: 400 when any reserved key is present.
     """
-    if not labels:
+    if not labels or _TURN_ACTOR_LABEL not in labels:
         return
-    reserved = tuple(k for k in labels if k == _TURN_ACTOR_LABEL)
-    if reserved:
-        raise OmnigentError(
-            f"labels {', '.join(repr(k) for k in reserved)} "
-            "are server-internal and cannot be set by clients",
-            code=ErrorCode.INVALID_INPUT,
-        )
+    raise OmnigentError(
+        f"label {_TURN_ACTOR_LABEL!r} is server-internal and cannot be set by clients",
+        code=ErrorCode.INVALID_INPUT,
+    )
 
 
 def _require_cost_control_label_authority(
@@ -21896,7 +21890,7 @@ def create_sessions_router(
 
         if method == "tools/call":
             _mcp_conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
-            turn_actor = _mcp_conv.labels.get(_TURN_ACTOR_LABEL) if _mcp_conv else None
+            turn_actor = _mcp_conv.labels.get(_TURN_ACTOR_LABEL)
             return await _handle_mcp_tools_call(
                 rpc_id,
                 session_id,
