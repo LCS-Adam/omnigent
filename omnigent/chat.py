@@ -71,6 +71,7 @@ from omnigent.spec.types import AgentSpec, SkillSpec
 
 if TYPE_CHECKING:
     from omnigent._runner_startup import RunnerStartupProgress
+    from omnigent.repl._client_routing import ClientRouter
 
 console = Console()
 
@@ -851,6 +852,63 @@ def _server_auth(
     if creds is not None and creds.token:
         return _DatabricksTokenAuth(server_url=server_url)
     return None
+
+
+def _build_client_router(
+    *,
+    agent_yaml: Path | None,
+    server_url: str,
+) -> ClientRouter | None:
+    """Build the client-side model router from config, if configured.
+
+    Reads the ``client_router`` block from the effective client config.
+    When it names a ``base_url``, returns a :class:`ClientRouter` that
+    routes the first turn of a fresh session; otherwise returns ``None``.
+
+    Auth is resolved per-endpoint: when the router's host matches the
+    omni server the client already talks to, the server auth is reused
+    (so a local unauthenticated server needs no token); otherwise a
+    Databricks bearer is minted for the router's own host.
+
+    :param agent_yaml: Path to the local agent spec; the spec supplies
+        the candidate model catalog. ``None`` (e.g. URL/attach targets)
+        disables client routing.
+    :param server_url: The omni server base URL, for host comparison.
+    :returns: A configured router, or ``None`` when disabled.
+    """
+    if agent_yaml is None:
+        return None
+    from omnigent.cli import _load_effective_config
+
+    cfg = _load_effective_config()
+    router_cfg = cfg.get("client_router")
+    if not isinstance(router_cfg, dict):
+        return None
+    base_url = router_cfg.get("base_url")
+    if not isinstance(base_url, str) or not base_url.strip():
+        return None
+    router_name = router_cfg.get("router_name")
+    if not isinstance(router_name, str) or not router_name.strip():
+        logger.warning("client_router.base_url is set but router_name is missing; skipping")
+        return None
+
+    from urllib.parse import urlparse
+
+    from omnigent.repl._client_routing import ClientRouter
+
+    router_host = urlparse(base_url).netloc
+    server_host = urlparse(server_url).netloc
+    if router_host == server_host:
+        auth = _server_auth(server_url=server_url)
+    else:
+        from omnigent.inner.databricks_executor import _resolve_databricks_auth
+
+        try:
+            auth, _host = _resolve_databricks_auth(host=router_host)
+        except Exception:  # noqa: BLE001 — auth resolution is best-effort; unauthed request falls through
+            logger.debug("client_router auth resolution failed for %s", router_host, exc_info=True)
+            auth = None
+    return ClientRouter(base_url=base_url.strip(), router_name=router_name.strip(), auth=auth)
 
 
 def _chat_with_server(
@@ -3974,6 +4032,18 @@ def _run_repl(
         if attach_harness is not None:
             launch_harness = attach_harness
 
+        # Client-side model routing (opt-in via the client_router config
+        # block). The loaded spec supplies the candidate model catalog;
+        # only fresh sessions route (enforced in the REPL adapter).
+        client_router = _build_client_router(agent_yaml=agent_yaml, server_url=base_url)
+        routing_agent_spec: object | None = None
+        if client_router is not None and agent_yaml is not None:
+            try:
+                routing_agent_spec = load_spec(agent_yaml)
+            except Exception:  # noqa: BLE001 — spec unreadable → disable routing, never block startup
+                logger.debug("client routing: spec load failed; disabling", exc_info=True)
+                client_router = None
+
         async with OmnigentClient(
             base_url=base_url,
             headers=_server_headers(runner_id=runner_id),
@@ -4015,6 +4085,8 @@ def _run_repl(
                 agent_description=agent_description,
                 used_families=used_families,
                 attach_only=attach_only,
+                client_router=client_router,
+                agent_spec=routing_agent_spec,
                 on_session_start=(
                     lambda session_id: open_conversation_link_if_enabled(
                         base_url=base_url,

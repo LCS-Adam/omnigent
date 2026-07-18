@@ -70,6 +70,7 @@ from rich.text import Text
 from omnigent.spec.types import SkillSpec
 
 if TYPE_CHECKING:
+    from omnigent.repl._client_routing import ClientRouter
     from omnigent.server.schemas import SessionStatusEvent
 
 _log = logging.getLogger(__name__)
@@ -1269,6 +1270,8 @@ class _SessionsChatReplAdapter:
         field_input_state: _FieldInputState | None = None,
         host: TerminalHost | None = None,
         fmt: RichBlockFormatter | None = None,
+        client_router: ClientRouter | None = None,
+        agent_spec: object | None = None,
     ) -> None:
         """
         Wire the adapter; do NOT issue any HTTP calls.
@@ -1315,6 +1318,12 @@ class _SessionsChatReplAdapter:
             field values interactively via the main input loop.
         :param host: Terminal output channel for rendering field prompts.
         :param fmt: Formatter for styling field prompts.
+        :param client_router: Optional client-side model router. When set
+            (and this is a fresh session), the first user message is
+            routed through it and the chosen model is attached as the
+            event's ``model_override``. ``None`` disables client routing.
+        :param agent_spec: The loaded agent spec, used to build the
+            router's candidate model list. Required for client routing.
         """
         self._client = client
         self._agent_id: str | None = None
@@ -1325,6 +1334,15 @@ class _SessionsChatReplAdapter:
         self._host = host
         self._fmt = fmt
         self._session_id: str | None = session_id
+        # Client-side routing fires only on the first message of a
+        # freshly-created session; resumed sessions keep their persisted
+        # model. Snapshot fresh-vs-resumed at construction time because
+        # _ensure_session sets self._session_id on fresh creation, so it
+        # can't distinguish the two by the time send() runs.
+        self._client_router = client_router
+        self._agent_spec = agent_spec
+        self._is_fresh_session = session_id is None
+        self._routed_once = False
         self._session_bundle = session_bundle
         self._session_bundle_filename = session_bundle_filename
         self._runner_id = runner_id
@@ -2165,7 +2183,25 @@ class _SessionsChatReplAdapter:
             "data": {"role": "user", "content": content},
         }
         if self._model_override is not None:
+            # An explicit /model override always wins over client routing.
             event_payload["model_override"] = self._model_override
+        elif (
+            self._client_router is not None
+            and self._is_fresh_session
+            and not self._routed_once
+            and isinstance(input, str)
+        ):
+            # Route the first message of a fresh session. One shot per
+            # session; failures fall through to the agent's default model.
+            self._routed_once = True
+            from omnigent.repl._client_routing import route_options_from_spec
+
+            picked = await self._client_router.select(
+                prompt=input,
+                route_options=route_options_from_spec(self._agent_spec),
+            )
+            if picked is not None:
+                event_payload["model_override"] = picked
 
         # Signal that a turn is active. The _on_event callback
         # uses this to know it should handle streaming text deltas
@@ -2961,6 +2997,8 @@ async def run_repl(
     agent_description: str | None = None,
     used_families: list[str] | None = None,
     attach_only: bool = False,
+    client_router: ClientRouter | None = None,
+    agent_spec: object | None = None,
 ) -> str | None:
     """The entire REPL — using the framework.
 
@@ -3150,6 +3188,8 @@ async def run_repl(
         field_input_state=field_input_state,
         host=host,
         fmt=fmt,
+        client_router=client_router,
+        agent_spec=agent_spec,
     )
     # Make per-invocation log paths visible to slash commands such as
     # /logs without broadening the slash-command dispatch signature.
