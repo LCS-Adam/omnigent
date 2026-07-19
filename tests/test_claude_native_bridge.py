@@ -25,6 +25,7 @@ from omnigent.claude_native_bridge import (
     _claude_prompt_rendered,
     _hook_record_from_jsonl_record,
     _JsonlRecord,
+    _turn_in_flight,
     augment_claude_args,
     count_hook_events,
     display_cost_approval_popup,
@@ -2891,6 +2892,53 @@ def test_user_prompt_submit_seen_since_detects_parent_prompt(
     assert user_prompt_submit_seen_since(bridge_dir, 1)
 
 
+# ── _turn_in_flight ──────────────────────────────────────────────────
+
+
+def test_turn_in_flight_true_after_prompt_before_stop(tmp_path: Path) -> None:
+    """A prompt accepted with no ``Stop`` since reads as a turn in flight."""
+    bridge_dir = tmp_path / "bridge"
+    record_hook_event(bridge_dir, {"hook_event_name": "SessionStart", "session_id": "p"})
+    record_hook_event(bridge_dir, {"hook_event_name": "UserPromptSubmit", "session_id": "p"})
+    assert _turn_in_flight(bridge_dir)
+    record_hook_event(bridge_dir, {"hook_event_name": "PreToolUse", "session_id": "p"})
+    assert _turn_in_flight(bridge_dir)
+
+
+def test_turn_in_flight_false_after_stop(tmp_path: Path) -> None:
+    """A ``Stop`` as the latest parent hook means the turn is idle."""
+    bridge_dir = tmp_path / "bridge"
+    record_hook_event(bridge_dir, {"hook_event_name": "UserPromptSubmit", "session_id": "p"})
+    record_hook_event(bridge_dir, {"hook_event_name": "Stop", "session_id": "p"})
+    assert not _turn_in_flight(bridge_dir)
+
+
+def test_turn_in_flight_ignores_subagent_activity(tmp_path: Path) -> None:
+    """
+    A running subagent under an idle parent is not the parent in flight.
+
+    Subagent hooks share ``hooks.jsonl``; a subagent ``UserPromptSubmit``
+    after the parent's ``Stop`` must not read as the parent being busy.
+    """
+    bridge_dir = tmp_path / "bridge"
+    record_hook_event(bridge_dir, {"hook_event_name": "UserPromptSubmit", "session_id": "p"})
+    record_hook_event(bridge_dir, {"hook_event_name": "Stop", "session_id": "p"})
+    record_hook_event(
+        bridge_dir,
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "s",
+            "transcript_path": "/x/subagents/s.jsonl",
+        },
+    )
+    assert not _turn_in_flight(bridge_dir)
+
+
+def test_turn_in_flight_false_without_hooks_file(tmp_path: Path) -> None:
+    """A missing ``hooks.jsonl`` reports no turn in flight rather than raising."""
+    assert not _turn_in_flight(tmp_path / "bridge")
+
+
 def test_user_prompt_submit_seen_since_ignores_subagent_prompt(
     tmp_path: Path,
 ) -> None:
@@ -3023,6 +3071,54 @@ def test_inject_user_message_raises_when_prompt_never_registers(
     monkeypatch.setattr("subprocess.run", _fake_run)
     with pytest.raises(RuntimeError, match="UserPromptSubmit"):
         inject_user_message(bridge_dir, content="never delivered")
+
+
+def test_inject_user_message_relaxes_ack_when_turn_in_flight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A message injected mid-turn is delivered even without a fresh ack.
+
+    When a turn is already running, Claude Code queues the injected
+    message and does not record its ``UserPromptSubmit`` until that turn
+    stops — so the strict Phase-1 ack cannot land in its window. This is
+    the same "box clears, no new UserPromptSubmit" shape as
+    ``raises_when_prompt_never_registers``, but here a turn is in flight
+    (``UserPromptSubmit`` with no ``Stop`` since), so the pane-level
+    submit is the ack and the helper must not raise.
+    """
+    monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
+    _shrink_ack_timers(monkeypatch)
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir, socket_path=Path("/tmp/example/tmux.sock"), tmux_target="claude:0.0"
+    )
+    # A turn is running: prompt accepted (UserPromptSubmit) with no Stop
+    # since. This is the pre-inject state _turn_in_flight keys on.
+    record_hook_event(bridge_dir, {"hook_event_name": "SessionStart", "session_id": "p"})
+    record_hook_event(bridge_dir, {"hook_event_name": "UserPromptSubmit", "session_id": "p"})
+
+    enters: list[list[str]] = []
+    tui = {"pane": "❯ "}
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "paste-buffer" in cmd:
+            tui["pane"] = "❯ steer mid turn"
+        if cmd[-1] == "Enter":
+            enters.append(cmd)
+            # Box clears (queued behind the running turn) but no new
+            # UserPromptSubmit fires until that turn stops.
+            tui["pane"] = "❯ "
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    inject_user_message(bridge_dir, content="steer mid turn")  # must not raise
+
+    assert enters, "The message should still be submitted at the pane level."
 
 
 def test_inject_user_message_raises_on_draft_restore_stall(

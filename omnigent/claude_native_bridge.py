@@ -178,6 +178,14 @@ _TURN_START_TIMEOUT_S = 20.0
 _TURN_START_HOOK_EVENTS: frozenset[str] = frozenset(
     {"PreToolUse", "PostToolUse", "Notification", "Stop", "StopFailure"}
 )
+# Parent hooks that mean a turn is actively running — the prompt was
+# accepted and no ``Stop`` / ``StopFailure`` has ended it yet. Used to
+# detect a turn in flight so the post-inject ack can be relaxed: a
+# message injected mid-turn is queued by Claude Code and does not fire
+# its own ``UserPromptSubmit`` until the running turn stops.
+_TURN_ACTIVE_HOOK_EVENTS: frozenset[str] = frozenset(
+    {"UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification"}
+)
 # Claude Code collapses large pastes into this placeholder in the
 # input box instead of rendering the text itself.
 _PASTED_PLACEHOLDER_PREFIX = "[Pasted text"
@@ -2349,6 +2357,48 @@ def _turn_activity_hook_seen_since(bridge_dir: Path, start_event_count: int) -> 
     return False
 
 
+def _turn_in_flight(bridge_dir: Path) -> bool:
+    """
+    Return whether a parent turn is running right now.
+
+    A turn is in flight when the most recent parent (non-subagent) hook
+    is a turn-active event (:data:`_TURN_ACTIVE_HOOK_EVENTS` — the prompt
+    was accepted and tools may be running) rather than a terminal
+    ``Stop`` / ``StopFailure``. Subagent hooks are skipped so a running
+    subagent under an idle parent does not read as the parent being busy.
+
+    This is the signal for relaxing the delivery ack: a message injected
+    while a turn is in flight is queued by Claude Code and does not fire
+    its own ``UserPromptSubmit`` until the running turn stops, so the
+    strict Phase-1 ack would time out on an otherwise-healthy delivery.
+
+    :param bridge_dir: Bridge directory path.
+    :returns: ``True`` when the latest parent hook is a turn-active event.
+    """
+    path = bridge_dir / _HOOKS_FILE
+    last_event: str | None = None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    envelope = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = envelope.get("payload") if isinstance(envelope, dict) else None
+                event_name = payload.get("hook_event_name") if isinstance(payload, dict) else None
+                if event_name is None:
+                    continue
+                transcript_path = (
+                    payload.get("transcript_path") if isinstance(payload, dict) else None
+                )
+                if isinstance(transcript_path, str) and "/subagents/" in transcript_path:
+                    continue
+                last_event = event_name
+    except FileNotFoundError:
+        return False
+    return last_event in _TURN_ACTIVE_HOOK_EVENTS
+
+
 def _assistant_turn_started_since(
     bridge_dir: Path,
     *,
@@ -2823,6 +2873,12 @@ def inject_user_message(
     hook_cursor, _ = read_hook_events_since(bridge_dir, 0)
     ack_transcript_path = read_transcript_path(bridge_dir)
     transcript_cursor = _count_transcript_lines(ack_transcript_path)
+    # A turn already running at inject time means Claude Code queues this
+    # message and won't fire its UserPromptSubmit until that turn stops —
+    # so the strict Phase-1 hook ack cannot succeed within its window even
+    # on a healthy delivery. Captured pre-inject so our own submit can't
+    # race it; used to relax the ack to the pane-level submit below.
+    turn_in_flight = _turn_in_flight(bridge_dir)
     # Clear any leftover text in Claude's input field before typing.
     # After Escape-cancel, Claude Code re-populates the prompt area
     # with the previous input for re-editing. Without this clear,
@@ -2909,6 +2965,13 @@ def inject_user_message(
     if not verify_delivery:
         # Legacy behavior for mid-turn steering: the pane-level submit above
         # is as far as we verify (a queued steering prompt may not ack).
+        return
+    if turn_in_flight:
+        # A turn was already running when we injected, so Claude Code has
+        # queued this message and won't record its UserPromptSubmit until
+        # that turn stops — the hook ack would time out on a delivery that
+        # in fact succeeded (the draft left the box above). Treat the
+        # pane-level submit as the ack here, matching the steering path.
         return
     # End-to-end ack: confirm UserPromptSubmit registered and a turn started.
     _await_delivery_ack(
