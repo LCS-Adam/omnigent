@@ -97,6 +97,7 @@ from omnigent.harness_plugins import (
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE as _HARNESS_NOT_CONFIGURED_ERROR_CODE,
 )
+from omnigent.llms.context_window import resolve_effective_context_window
 from omnigent.model_override import validate_model_override
 from omnigent.native_coding_agents import (
     native_coding_agent_for_agent_name,
@@ -144,6 +145,7 @@ from omnigent.runtime.policies.builder import (
 )
 from omnigent.runtime.policies.engine import PolicyEngine
 from omnigent.runtime.tool_output import cap_tool_output
+from omnigent.runtime.workflow import _find_spec_by_name
 from omnigent.server import presence, session_live_state
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
@@ -208,6 +210,8 @@ from omnigent.server.routes._host_worktree import CreatedWorktree
 from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.server.schemas import (
     AgentObject,
+    AutomaticSessionRenameRequest,
+    AutomaticSessionRenameResponse,
     BrowserActionRequestEvent,
     ChildSessionList,
     ChildSessionSummary,
@@ -1050,6 +1054,13 @@ def _prune_session_read_state(session_id: str) -> None:
 # response.* output (no forward, no persist). The fence lifts on the next
 # turn's "running" status or on any terminal response.* event.
 _interrupt_fenced_sessions: set[str] = set()
+
+# Host-spawned sessions whose runner tunnel we are about to tear down on
+# purpose as part of a user-initiated Stop. The relay's disconnect handler
+# consults this so an intentional tunnel drop resolves to a quiet idle state
+# instead of a scary ``runner_disconnected`` failure. One-shot: the disconnect
+# handler discards it, so a later genuine disconnect still surfaces normally.
+_intentional_stop_sessions: set[str] = set()
 
 # Turn-terminal response lifecycle events: the relay flushes buffered
 # assistant text on each of these and resets its turn-scoped state.
@@ -8696,7 +8707,7 @@ async def _stop_session_host_runner(
     host_id: str,
     runner_id: str,
     host_registry: Any,
-) -> None:
+) -> bool:
     """
     Terminate the host-launched runner backing a host-spawned session.
 
@@ -8733,10 +8744,14 @@ async def _stop_session_host_runner(
     :param host_registry: The :class:`HostRegistry` tracking live host
         tunnels on this replica, or ``None`` when host support is not wired
         (in-process / test setups without a host tunnel).
-    :returns: None.
+    :returns: ``True`` when the stop was delivered and acknowledged (the
+        runner is exiting, so a tunnel drop is expected); ``False`` on any
+        best-effort early-out (no host registry, host offline/replaced,
+        ack timeout, or host-reported failure) where the runner may keep
+        running and no tunnel drop will follow.
     """
     if host_registry is None:
-        return
+        return False
     conn = host_registry.get(host_id)
     if conn is None:
         _logger.warning(
@@ -8747,7 +8762,7 @@ async def _stop_session_host_runner(
             session_id,
             host_id,
         )
-        return
+        return False
     from omnigent.host.frames import HostStopRunnerFrame, encode_host_frame
 
     request_id = secrets.token_hex(8)
@@ -8766,7 +8781,7 @@ async def _stop_session_host_runner(
             session_id,
             host_id,
         )
-        return
+        return False
     try:
         result = await asyncio.wait_for(
             future,
@@ -8780,7 +8795,7 @@ async def _stop_session_host_runner(
             runner_id,
             session_id,
         )
-        return
+        return False
     if result.get("status") == "failed":
         _logger.warning(
             "Host %s failed to stop runner %s for session %s: %s",
@@ -8789,6 +8804,8 @@ async def _stop_session_host_runner(
             session_id,
             result.get("error"),
         )
+        return False
+    return True
 
 
 def _build_new_item(
@@ -9105,7 +9122,9 @@ async def _dispatch_skill_slash_command_to_runner(
     return visible.id
 
 
-def _title_content_from_item(item: NewConversationItem) -> list[dict[str, Any]]:
+def _title_content_from_item(
+    item: NewConversationItem | ConversationItem,
+) -> list[dict[str, Any]]:
     """
     Extract title candidate content blocks from a session item.
 
@@ -10417,6 +10436,13 @@ async def _relay_runner_stream(
                                     None,
                                     conversation_store,
                                 )
+                                # A new turn proves the runner is live again, so
+                                # a prior Stop that never dropped the tunnel must
+                                # not leave the intentional-stop marker to swallow
+                                # this turn's genuine disconnect. Fence-independent
+                                # (the fence may already be cleared by a terminal
+                                # stop event), so it fires on every running edge.
+                                _intentional_stop_sessions.discard(session_id)
                             # PTY-activity status is a UI signal only. Terminal
                             # sub-agent delivery rides the Stop/StopFailure hook
                             # via external_session_status (the codex-shared path)
@@ -10735,26 +10761,41 @@ async def _relay_runner_stream(
             session_id,
             exc_info=True,
         )
-        # Publish a failed status so the client's SSE stream sees a
-        # clean error event instead of silent truncation (#1114).
-        disconnect_error = ErrorDetail(
-            code="runner_disconnected",
-            message="Runner disconnected unexpectedly.",
-        )
-        _publish_status(session_id, "failed", disconnect_error)
-        # Persist the disconnect cause as durable labels so the
-        # distinction survives into snapshots and child-session
-        # summaries. Without this the relay-fed cache only carries a
-        # generic ``failed`` and ``last_task_error`` is dropped, leaving
-        # the UI unable to tell a benign runner disconnect from a real
-        # task failure (Option B: render a "Disconnected" pill, not the
-        # red "Failed" pill). Cleared on the next ``running`` edge by the
-        # session.status handler, exactly like other failure labels.
-        await _persist_session_status_error_labels(
-            session_id,
-            disconnect_error,
-            conversation_store,
-        )
+        if session_id in _intentional_stop_sessions:
+            # User clicked Stop: the Stop handler brought this runner's tunnel
+            # down on purpose (see _stop_session_host_runner), so the drop is
+            # expected — not a failure. Publish a quiet idle and clear any error
+            # label so the chat and sidebar settle to a stopped state instead of
+            # rendering "Error · runner_disconnected". One-shot: discard the
+            # marker so a genuine later disconnect surfaces normally.
+            _intentional_stop_sessions.discard(session_id)
+            _publish_status(session_id, "idle")
+            await _persist_session_status_error_labels(
+                session_id,
+                None,
+                conversation_store,
+            )
+        else:
+            # Publish a failed status so the client's SSE stream sees a
+            # clean error event instead of silent truncation (#1114).
+            disconnect_error = ErrorDetail(
+                code="runner_disconnected",
+                message="Runner disconnected unexpectedly.",
+            )
+            _publish_status(session_id, "failed", disconnect_error)
+            # Persist the disconnect cause as durable labels so the
+            # distinction survives into snapshots and child-session
+            # summaries. Without this the relay-fed cache only carries a
+            # generic ``failed`` and ``last_task_error`` is dropped, leaving
+            # the UI unable to tell a benign runner disconnect from a real
+            # task failure (Option B: render a "Disconnected" pill, not the
+            # red "Failed" pill). Cleared on the next ``running`` edge by the
+            # session.status handler, exactly like other failure labels.
+            await _persist_session_status_error_labels(
+                session_id,
+                disconnect_error,
+                conversation_store,
+            )
     except asyncio.CancelledError:
         raise
     finally:
@@ -10764,6 +10805,12 @@ async def _relay_runner_stream(
         # mid-turn, or a rebind cancellation) can't strand it forever.
         # Normal turn-ends already clear via record_publish.
         inflight_text.discard(session_id)
+        # The intentional-stop marker is consumed by the disconnect handler
+        # above on the expected path; discard it here too so a relay that
+        # exits some other way (clean [DONE], rebind cancellation) can't
+        # leave a stale marker to swallow a later genuine disconnect on the
+        # reused per-session relay task.
+        _intentional_stop_sessions.discard(session_id)
         # Relay ended (runner dropped/rebound): re-discover runner-backed
         # snapshot overlays next time. Cancel in-flight fetches so they can't
         # land stale values from the dead runner after this pop.
@@ -12168,11 +12215,13 @@ async def _stream_live_events(
     reconcile pre-subscribe state via the snapshot endpoint
     (``GET /v1/sessions/{id}``) and dedupe by item id.
 
-    On client disconnect the subscribe loop breaks; the
-    ``finally`` block emits a ``[DONE]`` sentinel so well-behaved
-    SSE consumers see a clean stream termination. The pub-sub
-    layer auto-cleans this generator's subscriber slot in its own
-    ``finally`` when iteration exits.
+    On client disconnect the subscribe loop breaks; the ``finally`` block
+    emits a ``[DONE]`` sentinel so well-behaved SSE consumers see a clean
+    stream termination. A subscriber-queue overflow instead ends without
+    ``[DONE]`` so clients treat it as a dropped transport, reconnect, and
+    reconcile from the persisted snapshot. The pub-sub layer auto-cleans
+    this generator's subscriber slot in its own ``finally`` when iteration
+    exits.
 
     Each emitted dict is validated against
     :data:`ServerStreamEvent` at the wire boundary so a runtime
@@ -12232,6 +12281,7 @@ async def _stream_live_events(
         presence_token = presence.connect(
             presence_root_id, session_id, viewer_user_id, viewer_idle
         )
+    subscriber_overflowed = False
     try:
         async for event in session_stream.subscribe(
             session_id,
@@ -12254,6 +12304,12 @@ async def _stream_live_events(
                 )
             validated = _SERVER_STREAM_EVENT_ADAPTER.validate_python(event)
             yield _format_sse(event_type, validated.model_dump())
+    except session_stream.SubscriberOverflowError:
+        subscriber_overflowed = True
+        _logger.warning(
+            "session stream subscriber overflowed for %s; closing for snapshot reconnect",
+            session_id,
+        )
     finally:
         # The non-None checks besides presence_token's are type
         # narrowing only: a minted token implies both were set above.
@@ -12263,7 +12319,8 @@ async def _stream_live_events(
             and presence_root_id is not None
         ):
             presence.disconnect(presence_root_id, viewer_user_id, presence_token)
-        yield "data: [DONE]\n\n"
+        if not subscriber_overflowed:
+            yield "data: [DONE]\n\n"
 
 
 # Bounds for per-session native-terminal pass-through args
@@ -15927,6 +15984,65 @@ def create_sessions_router(
     )
 
     # ── PATCH /sessions/{session_id} ────────────────────────────
+
+    @router.post(
+        "/sessions/{session_id}/auto-title",
+        response_model=AutomaticSessionRenameResponse,
+    )
+    async def automatically_rename_session(
+        request: Request,
+        session_id: str,
+        body: AutomaticSessionRenameRequest,
+    ) -> AutomaticSessionRenameResponse:
+        """Replace the deterministic first-message title when still current."""
+        user_id = _get_user_id(request, auth_provider)
+        await _require_access(
+            user_id,
+            session_id,
+            LEVEL_EDIT,
+            permission_store,
+            conversation_store,
+        )
+        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if conv is None:
+            raise OmnigentError("Session not found", code=ErrorCode.NOT_FOUND)
+        if conv.parent_conversation_id is not None:
+            return AutomaticSessionRenameResponse(renamed=False, reason="not_top_level")
+
+        title = " ".join(body.title.split())
+        if "\n" in body.title or "\r" in body.title or len(title) < 2:
+            raise OmnigentError(
+                "title must be a single non-empty line",
+                code=ErrorCode.INVALID_INPUT,
+            )
+
+        page = await asyncio.to_thread(
+            conversation_store.list_items,
+            session_id,
+            100,
+            None,
+            None,
+            "asc",
+            None,
+        )
+        seed_title: str | None = None
+        for item in page.data:
+            seed_title = synthesize_conversation_title(_title_content_from_item(item))
+            if seed_title is not None:
+                break
+        if seed_title is None:
+            return AutomaticSessionRenameResponse(renamed=False, reason="no_seed")
+        if conv.title != seed_title:
+            return AutomaticSessionRenameResponse(renamed=False, reason="title_changed")
+        updated = await asyncio.to_thread(
+            conversation_store.rename_conversation_if_title_matches,
+            session_id,
+            seed_title,
+            title,
+        )
+        if updated is None:
+            return AutomaticSessionRenameResponse(renamed=False, reason="title_changed")
+        return AutomaticSessionRenameResponse(renamed=True, title=updated.title)
 
     @router.patch(
         "/sessions/{session_id}",
@@ -20204,12 +20320,26 @@ def create_sessions_router(
             # only ever stop the runner bound to this session.
             stop_conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             if stop_conv is not None and stop_conv.host_id and stop_conv.runner_id:
-                await _stop_session_host_runner(
+                # Mark the tunnel drop as intentional BEFORE tearing it down so
+                # the relay's disconnect handler renders a quiet stopped state
+                # rather than "Error · runner_disconnected". Only host-spawned
+                # sessions drop the tunnel on Stop; other harnesses leave the
+                # runner connected, so there is nothing to suppress for them.
+                _intentional_stop_sessions.add(session_id)
+                teardown_delivered = await _stop_session_host_runner(
                     session_id,
                     stop_conv.host_id,
                     stop_conv.runner_id,
                     getattr(request.app.state, "host_registry", None),
                 )
+                if not teardown_delivered:
+                    # Best-effort stop did not land (host offline / timeout /
+                    # failure): no tunnel drop will follow, so the relay won't
+                    # reach the disconnect handler that consumes the marker.
+                    # Discard it now so it can't outlive this turn on the
+                    # reused per-session relay task and later swallow a genuine
+                    # runner_disconnected as a quiet idle.
+                    _intentional_stop_sessions.discard(session_id)
             # Stop is non-sticky: no persistent marker is written. The
             # runner tunnel dropping above flips ``runner_online`` to false
             # honestly, and the next message auto-relaunches the session on
@@ -21254,6 +21384,7 @@ def create_sessions_router(
                 reason="session-delete",
             )
         _interrupt_fenced_sessions.discard(session_id)
+        _intentional_stop_sessions.discard(session_id)
         deleted = await conversation_store.delete_conversation(session_id)
         if not deleted:
             raise _session_not_found()
@@ -22394,6 +22525,10 @@ async def _get_session_snapshot(
                         agent_cache.load, agent.id, agent.bundle_location
                     )
                     spec = loaded.spec
+                    if conv.sub_agent_name:
+                        child_spec = _find_spec_by_name(spec, conv.sub_agent_name)
+                        if child_spec is not None:
+                            spec = child_spec
                     # Prefer the spec's name over the agent row's: a
                     # switch-created session-scoped clone is named
                     # "<builtin> (switch ag_…)" for row disambiguation,
@@ -22402,9 +22537,6 @@ async def _get_session_snapshot(
                     if spec.name:
                         agent_name = spec.name
                     llm_model = spec.executor.model
-                    from omnigent.llms.context_window import (
-                        resolve_effective_context_window,
-                    )
 
                     # Size the context ring against whatever the next turn will
                     # actually run, using the SAME resolver the runner uses to
