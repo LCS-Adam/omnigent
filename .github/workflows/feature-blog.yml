@@ -333,7 +333,6 @@ jobs:
         if: steps.guard.outputs.proceed == 'true' && steps.creds.outputs.available == 'true' && steps.candidates.outputs.count != '0'
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          GATEWAY_BASE_URL: ${{ secrets.GATEWAY_BASE_URL }}
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.guard.outputs.tag }}
         run: |
@@ -469,6 +468,10 @@ jobs:
             # can reach it; the drafted-file secret scan above already ran.
             image_prompt="$(sed -n 's/^IMAGE_PROMPT:[[:space:]]*//p' "/tmp/drafter_out_${i}.txt" | head -n1)"
             if [ -n "$post" ] && [ -n "$image_prompt" ]; then
+              # GATEWAY_BASE_URL is scoped to THIS invocation only (not the step
+              # env), so the unsandboxed drafter run above never sees it and it
+              # can't reach the drafter's scanned stdout.
+              GATEWAY_BASE_URL='${{ secrets.GATEWAY_BASE_URL }}' \
               IMAGE_PROMPT="$image_prompt" SLUG="$slug" SITE="$SITE" POST="$post" \
               python3 -u <<'PYEOF' || echo "::warning::hero image generation failed for ${slug}; leaving heroArt blank"
           import base64, json, os, pathlib, re, urllib.request
@@ -511,8 +514,12 @@ jobs:
           post_path = pathlib.Path(os.environ["SITE"], os.environ["POST"])
           text = post_path.read_text(encoding="utf-8")
           text, n = re.subn(r'heroArt:\s*"[^"]*"', f'heroArt: "/images/blog/{slug}.png"', text, count=1)
-          if n:
-              post_path.write_text(text, encoding="utf-8")
+          if not n:
+              # No double-quoted heroArt to rewrite — drop the orphan PNG so we
+              # don't commit an image nothing references.
+              dest.unlink(missing_ok=True)
+              raise SystemExit("no heroArt: \"\" field to rewrite; discarding hero image")
+          post_path.write_text(text, encoding="utf-8")
           print(f"generated hero image ({len(raw)} bytes) -> /images/blog/{slug}.png")
           PYEOF
             fi
