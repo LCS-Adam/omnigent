@@ -333,6 +333,7 @@ jobs:
         if: steps.guard.outputs.proceed == 'true' && steps.creds.outputs.available == 'true' && steps.candidates.outputs.count != '0'
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          GATEWAY_BASE_URL: ${{ secrets.GATEWAY_BASE_URL }}
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.guard.outputs.tag }}
         run: |
@@ -458,6 +459,62 @@ jobs:
             if [ -n "$post" ]; then
               printf '\n---\n\n**Enjoying Omnigent?** If this is useful to you, [give us a star on GitHub ⭐](https://github.com/omnigent-ai/omnigent). Come say hi on [Discord](https://discord.gg/omnigent), or [download the latest release](https://omnigent.ai/download).\n' \
                 >> "${SITE}/${post}"
+            fi
+
+            # Generate the hero illustration from the drafter's IMAGE_PROMPT (the
+            # per-feature subject) plus a fixed brand style suffix, via the image
+            # model on the same gateway host. Fail-soft: any error leaves heroArt
+            # blank (the index falls back to a placeholder card), never blocking
+            # the draft. The scene is machine-drawn from the prompt, so no secret
+            # can reach it; the drafted-file secret scan above already ran.
+            image_prompt="$(sed -n 's/^IMAGE_PROMPT:[[:space:]]*//p' "/tmp/drafter_out_${i}.txt" | head -n1)"
+            if [ -n "$post" ] && [ -n "$image_prompt" ]; then
+              IMAGE_PROMPT="$image_prompt" SLUG="$slug" SITE="$SITE" POST="$post" \
+              python3 -u <<'PYEOF' || echo "::warning::hero image generation failed for ${slug}; leaving heroArt blank"
+          import base64, json, os, pathlib, re, urllib.request
+          gw = os.environ.get("GATEWAY_BASE_URL", "")
+          key = os.environ.get("LLM_API_KEY", "")
+          if not gw or not key:
+              raise SystemExit("no gateway/key for image generation")
+          # The image model lives on the same workspace host as the anthropic
+          # gateway (GATEWAY_BASE_URL = <host>/anthropic). Derive scheme://host.
+          m = re.match(r"(https?://[^/]+)", gw)
+          if not m:
+              raise SystemExit(f"cannot parse gateway host from {gw!r}")
+          model = os.environ.get("IMAGE_MODEL", "databricks-gemini-3-pro-image")
+          url = f"{m.group(1)}/serving-endpoints/{model}/invocations"
+          style = (" Flat vector illustration, dark navy tech background with subtle "
+                   "circuit lines, teal and pink accents, 16:9 wide, no text, no words, "
+                   "no logos.")
+          body = json.dumps({"messages": [{"role": "user",
+                 "content": os.environ["IMAGE_PROMPT"] + style}], "max_tokens": 4096}).encode()
+          req = urllib.request.Request(url, data=body, method="POST", headers={
+              "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+          with urllib.request.urlopen(req, timeout=120) as resp:
+              data = json.load(resp)
+          # The image is the content part of type image_url (a data: URI).
+          uri = None
+          for part in data["choices"][0]["message"]["content"]:
+              if isinstance(part, dict) and part.get("type") == "image_url":
+                  uri = part["image_url"]["url"]
+                  break
+          if not uri or "," not in uri:
+              raise SystemExit("no image in model response")
+          raw = base64.b64decode(uri.split(",", 1)[1])
+          if raw[:8] != b"\x89PNG\r\n\x1a\n":
+              raise SystemExit("model returned non-PNG data")
+          slug = os.environ["SLUG"]
+          dest = pathlib.Path(os.environ["SITE"], "public", "images", "blog", f"{slug}.png")
+          dest.parent.mkdir(parents=True, exist_ok=True)
+          dest.write_bytes(raw)
+          # Point heroArt at the served path (public/ maps to site root).
+          post_path = pathlib.Path(os.environ["SITE"], os.environ["POST"])
+          text = post_path.read_text(encoding="utf-8")
+          text, n = re.subn(r'heroArt:\s*"[^"]*"', f'heroArt: "/images/blog/{slug}.png"', text, count=1)
+          if n:
+              post_path.write_text(text, encoding="utf-8")
+          print(f"generated hero image ({len(raw)} bytes) -> /images/blog/{slug}.png")
+          PYEOF
             fi
 
             # Prettier the drafter's changed files so they pass the site's
