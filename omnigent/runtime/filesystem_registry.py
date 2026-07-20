@@ -27,6 +27,7 @@ import dataclasses
 import fnmatch
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -68,6 +69,53 @@ def _git_timeout_seconds() -> float:
 # so without this guard every request would re-spawn the ``git config``.
 _untracked_cache_enabled: set[str] = set()
 _untracked_cache_lock = threading.Lock()
+
+# Git roots whose ``core.fsmonitor`` we've already tried to enable this process.
+# Same one-shot rationale as the untracked cache above.
+_fsmonitor_enabled: set[str] = set()
+_fsmonitor_lock = threading.Lock()
+
+# Minimum git version whose built-in fsmonitor daemon understands
+# ``core.fsmonitor=true``.  On older git the value is read as a *hook path*, so
+# ``true`` would make every ``git status`` try to exec a hook named "true" and
+# fail — hence we never enable it below this version.
+_FSMONITOR_MIN_GIT_VERSION = (2, 37)
+
+
+def _fsmonitor_opt_out() -> bool:
+    """Return ``True`` when fsmonitor enablement is disabled via env.
+
+    ``OMNIGENT_GIT_FSMONITOR`` set to ``0``/``false``/``no``/``off`` (any case)
+    suppresses the long-lived fsmonitor daemon for operators who don't want it.
+    Unset or any other value leaves the default-on behavior.
+    """
+    raw = os.environ.get("OMNIGENT_GIT_FSMONITOR")
+    return raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}
+
+
+def _git_version(cwd: str) -> tuple[int, ...] | None:
+    """Return the installed git version as a tuple, or ``None`` if unknown.
+
+    Parses ``git version X.Y.Z`` into ``(X, Y, Z)``.  Any spawn error, timeout,
+    or unparseable output yields ``None`` so callers treat the version as
+    unknown rather than crash.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "version"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=_git_timeout_seconds(),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", result.stdout)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups(default="0"))
 
 
 class GitStatusUnavailable(RuntimeError):
@@ -722,6 +770,7 @@ class GitFilesystemRegistry(FilesystemRegistry):
         super().__init__(watch_path)
         self._git_root = git_root
         self._enable_untracked_cache()
+        self._enable_fsmonitor()
 
     def _enable_untracked_cache(self) -> None:
         """Best-effort ``core.untrackedCache=true`` on this repo.
@@ -771,6 +820,83 @@ class GitFilesystemRegistry(FilesystemRegistry):
         except (subprocess.TimeoutExpired, OSError):
             _logger.debug(
                 "GitFilesystemRegistry: could not enable core.untrackedCache in %s",
+                self._git_root,
+                exc_info=True,
+            )
+
+    def _enable_fsmonitor(self) -> None:
+        """Best-effort ``core.fsmonitor=true`` on this repo (git ≥ 2.37).
+
+        The built-in fsmonitor daemon watches the working tree via the OS's
+        native change-notification API, so ``git status`` only re-stats paths
+        that actually changed instead of walking the whole tree — the dominant
+        cost on huge monorepos where even ``-uall`` with an empty untracked set
+        takes tens of seconds.
+
+        Correctness guards, because unlike the untracked cache this can *break*
+        ``git status`` rather than merely fail to speed it up:
+
+        - **Version gate.** Below git 2.37 (:data:`_FSMONITOR_MIN_GIT_VERSION`)
+          ``core.fsmonitor`` names a *hook script*, so ``true`` would make every
+          ``git status`` fail. We only enable at or above that version.
+        - **Verify-and-rollback.** After enabling we run a cheap ``git status``;
+          if it doesn't cleanly return we unset ``core.fsmonitor`` so we never
+          leave the changed-files view broken.
+        - **Opt-out.** ``OMNIGENT_GIT_FSMONITOR=0`` disables enablement entirely.
+
+        Runs at most once per git-root per process (same rationale as the
+        untracked cache). Failures are swallowed; the daemon is a pure speedup.
+        """
+        if _fsmonitor_opt_out():
+            return
+        root_key = str(self._git_root)
+        with _fsmonitor_lock:
+            if root_key in _fsmonitor_enabled:
+                return
+            _fsmonitor_enabled.add(root_key)
+
+        version = _git_version(root_key)
+        if version is None or version < _FSMONITOR_MIN_GIT_VERSION:
+            _logger.debug(
+                "GitFilesystemRegistry: git %s < %s in %s; not enabling fsmonitor",
+                version,
+                _FSMONITOR_MIN_GIT_VERSION,
+                self._git_root,
+            )
+            return
+        try:
+            set_result = subprocess.run(
+                ["git", "config", "core.fsmonitor", "true"],
+                cwd=root_key,
+                capture_output=True,
+                timeout=_git_timeout_seconds(),
+            )
+            if set_result.returncode != 0:
+                return
+            # Verify with a cheap status (``-uno`` skips the untracked walk, so
+            # this is fast even on huge repos) and also warms the daemon. If it
+            # fails, fsmonitor is misbehaving here — roll the setting back.
+            verify = subprocess.run(
+                ["git", "status", "--porcelain", "-uno"],
+                cwd=root_key,
+                capture_output=True,
+                timeout=_git_timeout_seconds(),
+            )
+            if verify.returncode != 0:
+                _logger.warning(
+                    "GitFilesystemRegistry: git status failed after enabling fsmonitor "
+                    "in %s; rolling back",
+                    self._git_root,
+                )
+                subprocess.run(
+                    ["git", "config", "--unset", "core.fsmonitor"],
+                    cwd=root_key,
+                    capture_output=True,
+                    timeout=_git_timeout_seconds(),
+                )
+        except (subprocess.TimeoutExpired, OSError):
+            _logger.debug(
+                "GitFilesystemRegistry: could not enable core.fsmonitor in %s",
                 self._git_root,
                 exc_info=True,
             )

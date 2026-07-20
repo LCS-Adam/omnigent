@@ -49,6 +49,18 @@ def _inject(
     registry.record_change(path, operation, conv_id)
 
 
+@pytest.fixture(autouse=True)
+def _disable_fsmonitor_by_default(monkeypatch) -> None:
+    """Opt every test out of fsmonitor unless it explicitly re-enables it.
+
+    Constructing a :class:`GitFilesystemRegistry` on a real repo would otherwise
+    start a long-lived ``git fsmonitor--daemon`` in each test's temp repo — an
+    unwanted side effect across the suite. Tests that exercise fsmonitor undo
+    this with ``monkeypatch.delenv``.
+    """
+    monkeypatch.setenv("OMNIGENT_GIT_FSMONITOR", "0")
+
+
 @pytest.fixture
 def registry(tmp_path: Path) -> AgentEditFilesystemRegistry:
     """An :class:`AgentEditFilesystemRegistry` rooted at a fresh temp directory.
@@ -894,6 +906,171 @@ def test_untracked_cache_not_enabled_when_probe_fails(tmp_path: Path, monkeypatc
     )
     assert result.stdout.strip() == "", (
         f"core.untrackedCache should be unset when the probe fails, got {result.stdout.strip()!r}."
+    )
+
+
+# ── fsmonitor enablement ──────────────────────────────────────────────────────
+
+
+def _fsmonitor_value(cwd: Path, env: dict[str, str]) -> str:
+    """Return the repo's ``core.fsmonitor`` config value (``""`` when unset)."""
+    return subprocess.run(
+        ["git", "config", "--get", "core.fsmonitor"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env=env,
+    ).stdout.strip()
+
+
+def test_git_version_parses_output(tmp_path: Path, monkeypatch) -> None:
+    """``_git_version`` parses ``git version X.Y.Z`` into a tuple; None on failure."""
+    from omnigent.runtime import filesystem_registry as fsr
+
+    def _fake_run(args, *a, **kw):
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="git version 2.50.1 (Apple Git-155)\n", stderr=""
+        )
+
+    monkeypatch.setattr(fsr.subprocess, "run", _fake_run)
+    assert fsr._git_version(str(tmp_path)) == (2, 50, 1)
+
+    def _fail_run(args, *a, **kw):
+        raise OSError("git not found")
+
+    monkeypatch.setattr(fsr.subprocess, "run", _fail_run)
+    assert fsr._git_version(str(tmp_path)) is None
+
+
+def test_fsmonitor_not_enabled_when_opted_out(tmp_path: Path, monkeypatch) -> None:
+    """``OMNIGENT_GIT_FSMONITOR=0`` suppresses fsmonitor enablement entirely."""
+    from omnigent.runtime import filesystem_registry as fsr
+
+    env = _git_env()
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, env=env)
+    monkeypatch.setattr(fsr, "_fsmonitor_enabled", set())
+    monkeypatch.setenv("OMNIGENT_GIT_FSMONITOR", "0")
+
+    GitFilesystemRegistry(watch_path=tmp_path, git_root=tmp_path)
+
+    assert _fsmonitor_value(tmp_path, env) == "", "fsmonitor should stay unset when opted out."
+
+
+def test_fsmonitor_not_enabled_on_old_git(tmp_path: Path, monkeypatch) -> None:
+    """On git < 2.37 the config must not be written (would break git status)."""
+    from omnigent.runtime import filesystem_registry as fsr
+
+    env = _git_env()
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, env=env)
+    monkeypatch.setattr(fsr, "_fsmonitor_enabled", set())
+    monkeypatch.delenv("OMNIGENT_GIT_FSMONITOR", raising=False)
+    monkeypatch.setattr(fsr, "_git_version", lambda _cwd: (2, 30, 0))
+
+    config_calls: list[tuple] = []
+    real_run = subprocess.run
+
+    def _watch_run(args, *a, **kw):
+        if args[:3] == ["git", "config", "core.fsmonitor"]:
+            config_calls.append(tuple(args))
+        return real_run(args, *a, **kw)
+
+    monkeypatch.setattr(fsr.subprocess, "run", _watch_run)
+
+    GitFilesystemRegistry(watch_path=tmp_path, git_root=tmp_path)
+
+    assert config_calls == [], (
+        f"Expected no fsmonitor config write on old git, got {config_calls}."
+    )
+    assert _fsmonitor_value(tmp_path, env) == ""
+
+
+def test_fsmonitor_enabled_on_supported_git(tmp_path: Path, monkeypatch) -> None:
+    """On git ≥ 2.37 with a healthy status, ``core.fsmonitor=true`` is written.
+
+    The verify ``git status`` is stubbed to succeed so this test doesn't spawn a
+    real ``fsmonitor--daemon`` (which pytest's tmp-dir teardown would orphan);
+    the real ``git config`` write still runs, so the assertion is meaningful.
+    """
+    from omnigent.runtime import filesystem_registry as fsr
+
+    env = _git_env()
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, env=env)
+    monkeypatch.setattr(fsr, "_fsmonitor_enabled", set())
+    monkeypatch.delenv("OMNIGENT_GIT_FSMONITOR", raising=False)
+    monkeypatch.setattr(fsr, "_git_version", lambda _cwd: (2, 37, 0))
+
+    real_run = subprocess.run
+
+    def _stub_status(args, *a, **kw):
+        # Report a healthy status without starting the daemon.
+        if args[:2] == ["git", "status"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=b"", stderr=b"")
+        return real_run(args, *a, **kw)
+
+    monkeypatch.setattr(fsr.subprocess, "run", _stub_status)
+
+    GitFilesystemRegistry(watch_path=tmp_path, git_root=tmp_path)
+
+    assert _fsmonitor_value(tmp_path, env) == "true", (
+        "fsmonitor should be enabled on supported git with a healthy status."
+    )
+
+
+def test_fsmonitor_rolled_back_when_status_breaks(tmp_path: Path, monkeypatch) -> None:
+    """If ``git status`` fails after enabling, ``core.fsmonitor`` is unset again.
+
+    Guards the correctness invariant: we must never leave the changed-files
+    view broken. Simulated by making the post-enable verify status exit non-zero.
+    """
+    from omnigent.runtime import filesystem_registry as fsr
+
+    env = _git_env()
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, env=env)
+    monkeypatch.setattr(fsr, "_fsmonitor_enabled", set())
+    monkeypatch.delenv("OMNIGENT_GIT_FSMONITOR", raising=False)
+    monkeypatch.setattr(fsr, "_git_version", lambda _cwd: (2, 40, 0))
+
+    real_run = subprocess.run
+
+    def _break_status(args, *a, **kw):
+        if args[:2] == ["git", "status"]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=128, stdout=b"", stderr=b"fsmonitor hook broke"
+            )
+        return real_run(args, *a, **kw)
+
+    monkeypatch.setattr(fsr.subprocess, "run", _break_status)
+
+    GitFilesystemRegistry(watch_path=tmp_path, git_root=tmp_path)
+
+    assert _fsmonitor_value(tmp_path, env) == "", (
+        "fsmonitor must be rolled back when git status fails after enabling."
+    )
+
+
+def test_fsmonitor_config_attempted_once_per_root(tmp_path: Path, monkeypatch) -> None:
+    """The enablement runs at most once per git-root per process."""
+    from omnigent.runtime import filesystem_registry as fsr
+
+    env = _git_env()
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, env=env)
+    monkeypatch.setattr(fsr, "_fsmonitor_enabled", set())
+    monkeypatch.delenv("OMNIGENT_GIT_FSMONITOR", raising=False)
+
+    version_calls = 0
+
+    def _count_version(_cwd):
+        nonlocal version_calls
+        version_calls += 1
+        return (2, 30, 0)  # old git so nothing is actually written
+
+    monkeypatch.setattr(fsr, "_git_version", _count_version)
+
+    for _ in range(3):
+        GitFilesystemRegistry(watch_path=tmp_path, git_root=tmp_path)
+
+    assert version_calls == 1, (
+        f"Expected fsmonitor enablement attempted once per root, got {version_calls}."
     )
 
 
