@@ -10,8 +10,10 @@ CLAUDE_NATIVE_SESSION_RENAME_TOOL = "mcp__omnigent__sys_session_rename"
 
 SESSION_RENAME_INSTRUCTION = """
 Omnigent creates each session with its title set to the user's full prompt verbatim. On the
-FIRST turn, before doing any other work or replying, call sys_session_rename with a short
-summary-style title (3-6 words, ≤60 characters, action-first). Strip filler; keep the noun + verb.
+FIRST turn, rename the session in the background: call sys_session_rename alongside your first
+real work — emit it in the same parallel tool-call batch, not as a blocking step ahead of the
+task — so titling never delays your response to the user. Use a short summary-style title
+(3-6 words, ≤60 characters, action-first). Strip filler; keep the noun + verb.
 Summarize the user's actual intent; do not copy a conversational prompt verbatim or use generic
 titles such as "Help with task", "Create new design", or "Answer question".
 
