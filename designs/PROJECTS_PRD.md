@@ -495,6 +495,15 @@ Tracks what has actually landed vs. what remains. Updated as work ships.
 - ⬜ **Phase 2 — project defaults (P4a)** — add a `config` JSON column (small
   add-column migration) and plumb it through the store/entity/API; seed
   host/workspace/harness/model into the new-chat dialog (§8.1).
+  - **Replace the inference-based prefill (PR #2133).** That merged PR prefills
+    the composer by *inferring* defaults from the project's newest session
+    (host/agent/repo + a fresh worktree branch) — an explicit non-goal
+    workaround for the absence of stored project defaults. Once `config` stores
+    real defaults, retire that inference path (`web/src/shell/projectPrefill.ts`
+    and `useNewestProjectSession`) in favor of reading the stored config, so
+    there's one source of truth for a project's defaults instead of guessing
+    from history. Track this cleanup here so it isn't forgotten when Phase 2
+    lands.
 - ⬜ **Phase 3 — memory & context (P4b/P4c)** — new `project_memory` /
   `project_context` tables + agent read/write + injection (§8.2/§8.3).
 - ⬜ **Phase 4 — label consolidation (deferred; not required for the feature).**

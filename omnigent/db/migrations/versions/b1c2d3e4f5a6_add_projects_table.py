@@ -1,7 +1,7 @@
 """add projects table and conversation_metadata.project_id
 
 Revision ID: b1c2d3e4f5a6
-Revises: d7f1a2b3c4e5
+Revises: d1e2f3a4b5c6
 Create Date: 2026-07-16 00:00:00.000000
 
 Promotes "projects" from the implicit ``omni_project`` conversation label to a
@@ -35,7 +35,7 @@ from alembic import op
 from omnigent.db.db_models import Uuid16
 
 revision: str = "b1c2d3e4f5a6"
-down_revision: str | None = "d7f1a2b3c4e5"
+down_revision: str | None = "d1e2f3a4b5c6"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
