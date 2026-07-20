@@ -839,9 +839,12 @@ class GitFilesystemRegistry(FilesystemRegistry):
         - **Version gate.** Below git 2.37 (:data:`_FSMONITOR_MIN_GIT_VERSION`)
           ``core.fsmonitor`` names a *hook script*, so ``true`` would make every
           ``git status`` fail. We only enable at or above that version.
+        - **Respect existing config.** If ``core.fsmonitor`` is already set we
+          leave it alone rather than clobber an operator's value.
         - **Verify-and-rollback.** After enabling we run a cheap ``git status``;
-          if it doesn't cleanly return we unset ``core.fsmonitor`` so we never
-          leave the changed-files view broken.
+          if it doesn't cleanly return — a non-zero exit *or* a timeout / spawn
+          error — we unset ``core.fsmonitor`` so we never leave the changed-files
+          view broken.
         - **Opt-out.** ``OMNIGENT_GIT_FSMONITOR=0`` disables enablement entirely.
 
         Runs at most once per git-root per process (same rationale as the
@@ -864,7 +867,19 @@ class GitFilesystemRegistry(FilesystemRegistry):
                 self._git_root,
             )
             return
+
+        config_set = False
         try:
+            # Don't clobber an operator's existing core.fsmonitor (a custom hook
+            # path, or a deliberate ``false``): exit 0 means the key is set.
+            existing = subprocess.run(
+                ["git", "config", "--get", "core.fsmonitor"],
+                cwd=root_key,
+                capture_output=True,
+                timeout=_git_timeout_seconds(),
+            )
+            if existing.returncode == 0:
+                return
             set_result = subprocess.run(
                 ["git", "config", "core.fsmonitor", "true"],
                 cwd=root_key,
@@ -873,9 +888,10 @@ class GitFilesystemRegistry(FilesystemRegistry):
             )
             if set_result.returncode != 0:
                 return
+            config_set = True
             # Verify with a cheap status (``-uno`` skips the untracked walk, so
             # this is fast even on huge repos) and also warms the daemon. If it
-            # fails, fsmonitor is misbehaving here — roll the setting back.
+            # doesn't cleanly return, fsmonitor is misbehaving here — roll back.
             verify = subprocess.run(
                 ["git", "status", "--porcelain", "-uno"],
                 cwd=root_key,
@@ -888,16 +904,45 @@ class GitFilesystemRegistry(FilesystemRegistry):
                     "in %s; rolling back",
                     self._git_root,
                 )
-                subprocess.run(
-                    ["git", "config", "--unset", "core.fsmonitor"],
-                    cwd=root_key,
-                    capture_output=True,
-                    timeout=_git_timeout_seconds(),
-                )
+                self._rollback_fsmonitor(root_key)
         except (subprocess.TimeoutExpired, OSError):
+            # A hung or unspawnable verify is the canonical "doesn't cleanly
+            # return" case — and the most likely outcome against a cold daemon
+            # on a giant repo. If we already wrote the config, undo it so the
+            # changed-files view isn't left running under a broken fsmonitor.
             _logger.debug(
                 "GitFilesystemRegistry: could not enable core.fsmonitor in %s",
                 self._git_root,
+                exc_info=True,
+            )
+            if config_set:
+                self._rollback_fsmonitor(root_key)
+
+    def _rollback_fsmonitor(self, root_key: str) -> None:
+        """Best-effort ``git config --unset core.fsmonitor`` after a failed enable.
+
+        Never raises; a failed unset is logged at WARNING because it leaves the
+        broken ``true`` in place (the one state this guard must avoid).
+        """
+        try:
+            unset = subprocess.run(
+                ["git", "config", "--unset", "core.fsmonitor"],
+                cwd=root_key,
+                capture_output=True,
+                timeout=_git_timeout_seconds(),
+            )
+            if unset.returncode != 0:
+                _logger.warning(
+                    "GitFilesystemRegistry: failed to unset core.fsmonitor in %s "
+                    "(exit %d); it may remain enabled",
+                    root_key,
+                    unset.returncode,
+                )
+        except (subprocess.TimeoutExpired, OSError):
+            _logger.warning(
+                "GitFilesystemRegistry: could not unset core.fsmonitor in %s; "
+                "it may remain enabled",
+                root_key,
                 exc_info=True,
             )
 

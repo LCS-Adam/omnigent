@@ -1048,6 +1048,65 @@ def test_fsmonitor_rolled_back_when_status_breaks(tmp_path: Path, monkeypatch) -
     )
 
 
+def test_fsmonitor_rolled_back_when_verify_times_out(tmp_path: Path, monkeypatch) -> None:
+    """If the verify ``git status`` raises, ``core.fsmonitor`` is still unset.
+
+    A cold fsmonitor daemon on a huge repo is most likely to make the first
+    ``git status`` hang (``TimeoutExpired``) rather than exit non-zero — the
+    exception path must roll back too, or the config stays broken and the
+    one-shot guard prevents any retry.
+    """
+    from omnigent.runtime import filesystem_registry as fsr
+
+    env = _git_env()
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, env=env)
+    monkeypatch.setattr(fsr, "_fsmonitor_enabled", set())
+    monkeypatch.delenv("OMNIGENT_GIT_FSMONITOR", raising=False)
+    monkeypatch.setattr(fsr, "_git_version", lambda _cwd: (2, 40, 0))
+
+    real_run = subprocess.run
+
+    def _timeout_status(args, *a, **kw):
+        # The verify status hangs; the config set and the rollback --unset are
+        # real so we can assert the persisted state.
+        if args[:2] == ["git", "status"]:
+            raise subprocess.TimeoutExpired(cmd="git status", timeout=30)
+        return real_run(args, *a, **kw)
+
+    monkeypatch.setattr(fsr.subprocess, "run", _timeout_status)
+
+    GitFilesystemRegistry(watch_path=tmp_path, git_root=tmp_path)
+
+    assert _fsmonitor_value(tmp_path, env) == "", (
+        "fsmonitor must be rolled back when the verify status times out."
+    )
+
+
+def test_fsmonitor_respects_existing_config(tmp_path: Path, monkeypatch) -> None:
+    """A pre-existing ``core.fsmonitor`` value is left untouched, not clobbered."""
+    from omnigent.runtime import filesystem_registry as fsr
+
+    env = _git_env()
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, env=env)
+    # Operator already configured a custom fsmonitor hook path.
+    subprocess.run(
+        ["git", "config", "core.fsmonitor", "/custom/hook"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    monkeypatch.setattr(fsr, "_fsmonitor_enabled", set())
+    monkeypatch.delenv("OMNIGENT_GIT_FSMONITOR", raising=False)
+    monkeypatch.setattr(fsr, "_git_version", lambda _cwd: (2, 40, 0))
+
+    GitFilesystemRegistry(watch_path=tmp_path, git_root=tmp_path)
+
+    assert _fsmonitor_value(tmp_path, env) == "/custom/hook", (
+        "An operator's existing core.fsmonitor must not be overwritten."
+    )
+
+
 def test_fsmonitor_config_attempted_once_per_root(tmp_path: Path, monkeypatch) -> None:
     """The enablement runs at most once per git-root per process."""
     from omnigent.runtime import filesystem_registry as fsr
