@@ -177,6 +177,15 @@ follow-up. The nightly and PR workflows run at `0` for stable, comparable trend
 data; dispatch the workflow with a higher `network_delay_ms` when investigating
 a network optimization.
 
+**Mind the CI time budget.** The delay applies to *every* client→server
+request, so it multiplies across the full-turn journeys' round-trips — a cold
+start makes ~12 requests/op, and the turn journeys poll `GET /session` every
+0.2s. A large delay across the whole default journey set can exceed the
+workflow's 30-min per-leg timeout (empirically, `network_delay_ms=100` over all
+journeys times out; `10` finishes in ~6 min). For a bigger delay, pair it with
+a `--journeys` subset of the HTTP journeys, where the count is 1–2/op and there
+are no poll loops to amplify.
+
 ## Seeding a realistic corpus
 
 `seed.py` writes a sizeable, deterministic corpus directly through the store
