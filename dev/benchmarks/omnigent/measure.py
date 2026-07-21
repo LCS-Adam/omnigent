@@ -28,11 +28,16 @@ class RunResult:
     :param failures: Failure reason (e.g. ``"HTTP 500"`` / an exception
         class name) mapped to how many times it occurred.
     :param wall_time: Total elapsed seconds for the run, used for throughput.
+    :param http_requests: Total HTTP requests the server handled during this
+        run's timed region (from the server-side counter, cross-process traffic
+        included), or ``None`` when the counter was unavailable. Divided by
+        successful ops to report requests-per-op.
     """
 
     latencies_ms: list[float] = field(default_factory=list)
     failures: dict[str, int] = field(default_factory=dict)
     wall_time: float = 0.0
+    http_requests: int | None = None
 
     @property
     def n_success(self) -> int:
@@ -74,6 +79,16 @@ class RunResult:
         """Maximum latency in ms, or ``0.0`` when no operation succeeded."""
         return max(self.latencies_ms) if self.latencies_ms else 0.0
 
+    def requests_per_op(self) -> float | None:
+        """Server HTTP requests per successful op, or ``None`` when uncounted.
+
+        ``None`` when the server counter was unavailable or no op succeeded, so
+        an uncounted run is distinguishable from a genuine zero.
+        """
+        if self.http_requests is None or self.n_success == 0:
+            return None
+        return self.http_requests / self.n_success
+
 
 def _run_to_dict(result: RunResult) -> dict[str, object]:
     """Flatten one :class:`RunResult` into a JSON-serializable per-run row."""
@@ -88,6 +103,8 @@ def _run_to_dict(result: RunResult) -> dict[str, object]:
         "p99_ms": result.percentile(99),
         "max_ms": result.max_ms(),
         "rps": result.throughput,
+        "http_requests": result.http_requests,
+        "http_requests_per_op": result.requests_per_op(),
     }
 
 
@@ -133,6 +150,13 @@ def aggregate(results: list[RunResult]) -> dict[str, object]:
                 "avg_rps": statistics.mean(r.throughput for r in ok),
             }
         )
+        # Requests-per-op, averaged over the runs whose server counter was
+        # available. Only added when at least one such run exists, so journeys
+        # run without the counter (or before it loaded) carry no network key
+        # rather than a misleading zero.
+        per_op = [rpo for r in ok if (rpo := r.requests_per_op()) is not None]
+        if per_op:
+            summary["avg_http_requests_per_op"] = statistics.mean(per_op)
     return {"runs": runs, "summary": summary}
 
 
@@ -214,7 +238,12 @@ def print_results(journey_name: str, results: list[RunResult]) -> None:
     table.add_column("P99 ms", justify="right")
     table.add_column("Max ms", justify="right")
     table.add_column("Req/s", justify="right")
+    table.add_column("HTTP/op", justify="right")
     table.add_column("Failures", justify="right")
+
+    def _per_op_str(r: RunResult) -> str:
+        rpo = r.requests_per_op()
+        return f"{rpo:.1f}" if rpo is not None else "—"
 
     for i, r in enumerate(results):
         fail_str = f"[red]{r.n_failures}[/red]" if r.n_failures else "0"
@@ -226,6 +255,7 @@ def print_results(journey_name: str, results: list[RunResult]) -> None:
             f"{r.percentile(99):.1f}",
             f"{r.max_ms():.1f}",
             f"{r.throughput:.0f}",
+            _per_op_str(r),
             fail_str,
         )
 
@@ -234,6 +264,8 @@ def print_results(journey_name: str, results: list[RunResult]) -> None:
     # summary in aggregate()).
     ok = _summary_runs(results)
     if len(results) > 1 and ok:
+        per_op = [rpo for r in ok if (rpo := r.requests_per_op()) is not None]
+        per_op_avg = f"[bold]{statistics.mean(per_op):.1f}[/bold]" if per_op else "—"
         table.add_section()
         table.add_row(
             "[bold]avg[/bold]",
@@ -243,6 +275,7 @@ def print_results(journey_name: str, results: list[RunResult]) -> None:
             f"[bold]{statistics.mean(r.percentile(99) for r in ok):.1f}[/bold]",
             f"[bold]{statistics.mean(r.max_ms() for r in ok):.1f}[/bold]",
             f"[bold]{statistics.mean(r.throughput for r in ok):.0f}[/bold]",
+            per_op_avg,
             "",
         )
 

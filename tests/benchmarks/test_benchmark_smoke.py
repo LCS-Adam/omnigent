@@ -51,6 +51,7 @@ def _smoke_args(**overrides: object) -> argparse.Namespace:
         "runs": 1,
         "warmup": 1,
         "output": None,
+        "network_delay_ms": 0.0,
         "min_rps": None,
         "max_p50_ms": None,
         "max_p99_ms": None,
@@ -83,6 +84,7 @@ def test_aggregate_summary_keys() -> None:
     block = aggregate(runs)
     run_rows = cast(list[dict[str, object]], block["runs"])
     assert len(run_rows) == 2
+    # No http_requests recorded → no network key in the summary.
     assert set(_d(block["summary"])) == {
         "runs_total",
         "runs_ok",
@@ -95,6 +97,32 @@ def test_aggregate_summary_keys() -> None:
     assert _d(block["summary"])["runs_total"] == 2
     assert _d(block["summary"])["runs_ok"] == 2
     assert run_rows[0]["n_success"] == 2
+    # The per-run row still carries the network fields, as null when uncounted.
+    assert run_rows[0]["http_requests"] is None
+    assert run_rows[0]["http_requests_per_op"] is None
+
+
+def test_aggregate_includes_network_block_when_counted() -> None:
+    """When runs carry a server request count, the summary reports per-op volume."""
+    # Two ops, four server requests → 2.0 requests/op.
+    runs = [RunResult(latencies_ms=[5.0, 15.0], wall_time=1.0, http_requests=4) for _ in range(2)]
+    block = aggregate(runs)
+    summary = _d(block["summary"])
+    assert summary["avg_http_requests_per_op"] == 2.0
+    run_rows = cast(list[dict[str, object]], block["runs"])
+    assert run_rows[0]["http_requests"] == 4
+    assert run_rows[0]["http_requests_per_op"] == 2.0
+
+
+def test_requests_per_op_none_when_uncounted_or_no_success() -> None:
+    """requests_per_op distinguishes uncounted (None) from a real zero."""
+    assert RunResult(latencies_ms=[5.0]).requests_per_op() is None  # http_requests unset
+    # Counted but no successful op → None, not a divide-by-zero.
+    failed = RunResult(wall_time=1.0, http_requests=3)
+    failed.record_failure("HTTP 500")
+    assert failed.requests_per_op() is None
+    # Counted with successes → the ratio.
+    assert RunResult(latencies_ms=[1.0, 1.0], http_requests=6).requests_per_op() == 3.0
 
 
 def test_aggregate_excludes_fully_failed_run_from_summary() -> None:
@@ -349,6 +377,8 @@ async def test_benchmark_smoke_end_to_end() -> None:
     assert _d(report["config"])["with_runner"] is False
     # No --database-uri → the throwaway-SQLite path, labelled "sqlite".
     assert _d(report["config"])["backend"] == "sqlite"
+    # The delay knob is recorded in config; default run injects none.
+    assert _d(report["config"])["network_delay_ms"] == 0.0
 
     journeys = _d(report["journeys"])
     for name in _SMOKE_JOURNEYS:
@@ -364,6 +394,11 @@ async def test_benchmark_smoke_end_to_end() -> None:
         # Zero failures — a failure here means the HTTP path itself broke.
         assert run_rows[0]["n_failures"] == 0, f"{name}: {run_rows[0]['failures']}"
         assert cast(float, _d(block["summary"])["avg_p50_ms"]) >= 0.0
+        # The CI-only debug router loaded, so the server request counter was
+        # readable: each HTTP journey issues at least one request per op.
+        per_op = _d(block["summary"]).get("avg_http_requests_per_op")
+        assert per_op is not None, f"{name} produced no request count"
+        assert cast(float, per_op) >= 1.0, f"{name}: {per_op} requests/op"
 
 
 @pytest.mark.timeout(180)
