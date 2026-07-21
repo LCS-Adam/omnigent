@@ -168,6 +168,22 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
             rows = session.execute(stmt).scalars().all()
             return [_to_entity(r) for r in rows]
 
+    def list_for_user(self, user_id: str | None) -> list[ScheduledTask]:
+        """List one user's tasks ordered by ``created_at ASC, id ASC``.
+
+        ``user_id is None`` compiles to ``user_id IS NULL`` (the single-user/OSS
+        rows). Served as a covered seek by ``ix_scheduled_tasks_user_scope``.
+        """
+        with self._session() as session:
+            stmt = (
+                select(SqlScheduledTask)
+                .where(SqlScheduledTask.workspace_id == current_workspace_id())
+                .where(SqlScheduledTask.user_id == user_id)
+                .order_by(asc(SqlScheduledTask.created_at), asc(SqlScheduledTask.id))
+            )
+            rows = session.execute(stmt).scalars().all()
+            return [_to_entity(r) for r in rows]
+
     def list_active(self) -> list[ScheduledTask]:
         """List active scheduled tasks ordered by ``created_at ASC, id ASC``."""
         with self._session() as session:

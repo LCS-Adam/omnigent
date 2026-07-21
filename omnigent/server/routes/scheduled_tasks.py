@@ -239,7 +239,7 @@ def create_scheduled_tasks_router(
         """List the caller's scheduled tasks."""
         owner = _owner(request)
         owner_id = None if owner == RESERVED_USER_LOCAL else owner
-        tasks = [t for t in store.list() if t.user_id == owner_id]
+        tasks = store.list_for_user(owner_id)
         return {"scheduled_tasks": [_to_response(t) for t in tasks]}
 
     @router.get("/scheduled-tasks/{scheduled_task_id}")

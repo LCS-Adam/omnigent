@@ -256,6 +256,62 @@ def test_list_orders_by_created_at_then_id(store: SqlAlchemyScheduledTaskStore) 
     assert ids == [id_a, id_b]
 
 
+def test_list_for_user_filters_by_owner(store: SqlAlchemyScheduledTaskStore) -> None:
+    """``list_for_user`` returns only the given user's tasks (any state).
+
+    ``None`` selects the NULL-owner (single-user/OSS) rows via ``IS NULL``.
+    Ordered by ``created_at, id``; ids picked so the byte-order tiebreak is
+    deterministic (``…a1`` < ``…a2``).
+    """
+    alice_a = "000000000000000000000000000000a1"
+    alice_b = "000000000000000000000000000000a2"
+    bob = "000000000000000000000000000000b1"
+    local = "000000000000000000000000000000c1"
+    store.create(
+        scheduled_task_id=alice_a,
+        name="a",
+        prompt="p",
+        rrule="FREQ=MINUTELY",
+        user_id="alice",
+        agent_id=_uid("ag"),
+        timezone="UTC",
+    )
+    store.create(
+        scheduled_task_id=alice_b,
+        name="b",
+        prompt="p",
+        rrule="FREQ=MINUTELY",
+        user_id="alice",
+        agent_id=_uid("ag"),
+        timezone="UTC",
+        state="paused",
+    )
+    store.create(
+        scheduled_task_id=bob,
+        name="c",
+        prompt="p",
+        rrule="FREQ=MINUTELY",
+        user_id="bob",
+        agent_id=_uid("ag"),
+        timezone="UTC",
+    )
+    store.create(
+        scheduled_task_id=local,
+        name="d",
+        prompt="p",
+        rrule="FREQ=MINUTELY",
+        user_id=None,
+        agent_id=_uid("ag"),
+        timezone="UTC",
+    )
+
+    # alice's list spans both active and paused; bob's and the NULL-owner rows
+    # are excluded, and each other user's filter is isolated.
+    assert [r.id for r in store.list_for_user("alice")] == [alice_a, alice_b]
+    assert [r.id for r in store.list_for_user("bob")] == [bob]
+    assert [r.id for r in store.list_for_user(None)] == [local]
+
+
 def test_list_active_excludes_non_active(store: SqlAlchemyScheduledTaskStore) -> None:
     """``list_active`` returns only active tasks, excluding paused/deleted."""
     store.create(

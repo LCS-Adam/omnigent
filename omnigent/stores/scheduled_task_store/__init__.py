@@ -96,6 +96,17 @@ class ScheduledTaskStore(ABC):
         ...
 
     @abstractmethod
+    def list_for_user(self, user_id: str | None) -> list[ScheduledTask]:
+        """
+        List one user's scheduled tasks ordered by ``created_at ASC, id ASC``.
+
+        :param user_id: The owning user. ``None`` selects the single-user/OSS
+            rows whose ``user_id`` is ``NULL``.
+        :returns: List of :class:`ScheduledTask` instances owned by ``user_id``.
+        """
+        ...
+
+    @abstractmethod
     def list_active(self) -> list[ScheduledTask]:
         """
         List active scheduled tasks ordered by ``created_at ASC, id ASC``.
