@@ -2689,6 +2689,14 @@ function reconnectStatusPatch(session: Session, s: ChatState): Partial<ChatState
   if (session.lastTotalTokens != null) patch.tokensUsed = session.lastTotalTokens;
   if (session.totalCostUsd != null) patch.sessionCostUsd = session.totalCostUsd;
   if (session.usageByModel != null) patch.sessionUsageByModel = session.usageByModel;
+  // `waiting` is a TURN-END snapshot (the turn finished; only background work
+  // outlives it), so it settles the local send lifecycle like `idle` — it must
+  // NOT reopen a streaming response. The server keeps `active_response_id`
+  // populated across `waiting` (it only pops on idle/failed), so grouping
+  // `waiting` with `running` below would re-open "streaming" on a reload/
+  // reconnect and strand the composer on the "(queued)" placeholder — re-queuing
+  // sends, the exact behavior this fix removes. `sessionStatus` stays `waiting`
+  // and `backgroundTaskCount` is recovered above, so the spinner survives.
   if (
     (session.status === "idle" || session.status === "failed") &&
     s.activeResponse?.state === "streaming"
@@ -2699,8 +2707,15 @@ function reconnectStatusPatch(session: Session, s: ChatState): Partial<ChatState
       error: null,
     };
     patch.status = "idle";
+  } else if (session.status === "waiting") {
+    // Turn ended, background work remains. Finalize a still-streaming response
+    // and free the local send lifecycle so the composer dispatches a new turn.
+    if (s.activeResponse?.state === "streaming") {
+      patch.activeResponse = { ...s.activeResponse, state: "completed", error: null };
+    }
+    patch.status = "idle";
   } else if (
-    (session.status === "running" || session.status === "waiting") &&
+    session.status === "running" &&
     session.activeResponseId != null &&
     s.activeResponse?.responseId !== session.activeResponseId
   ) {
@@ -4244,8 +4259,13 @@ export function handleSessionEvent(event: StreamEvent): void {
           } else if (event.status === "waiting") {
             // Turn ended (background work remains) but the `waiting` edge's id
             // doesn't match the tracked response — free the send lifecycle
-            // anyway so a new message isn't stranded behind background work.
+            // anyway so a new message isn't stranded behind background work,
+            // and finalize a still-streaming bubble so it doesn't linger with a
+            // spinner that no edge will ever close.
             patch.status = "idle";
+            if (s.activeResponse?.state === "streaming") {
+              patch.activeResponse = { ...s.activeResponse, state: "completed", error: null };
+            }
           }
           // Clear ALL pending user messages on terminal status. Any
           // message still pending when the session reaches idle was

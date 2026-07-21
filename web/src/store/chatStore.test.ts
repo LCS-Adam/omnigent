@@ -2628,6 +2628,9 @@ describe("chatStore — background-shell tally (claude-native)", () => {
     const state = useChatStore.getState();
     expect(state.status).toBe("idle");
     expect(state.sessionStatus).toBe("waiting");
+    // The stale streaming bubble is finalized so it doesn't linger spinning —
+    // no future edge names this id to close it.
+    expect(state.activeResponse?.state).toBe("completed");
   });
 
   it("clears the shell count when a new turn starts (running edge)", () => {
