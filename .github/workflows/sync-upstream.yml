@@ -1,0 +1,24 @@
+name: sync-upstream
+
+# Keeps this fork's main current with omnigent-ai/omnigent.
+# Uses the merge-upstream API rather than a hard reset: this fork carries one
+# extra commit (this workflow file), so a --force sync would delete the workflow
+# that performs the sync. merge-upstream fast-forwards when possible and merges
+# otherwise, and upstream never touches this path, so it stays conflict-free.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Merge upstream into main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
+            -f branch=main --jq '.merge_type, .message'
