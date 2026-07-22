@@ -1817,16 +1817,19 @@ describe("NewChatLandingScreen skills menu", () => {
     expect(screen.getByText("Cross-vendor review")).toBeTruthy();
   });
 
-  it("filters by the typed query and fills the draft on click", () => {
+  it("filters by the typed query (substring) and fills the draft on click", () => {
     mockAgents([skilledAgent()]);
     renderLanding();
+    // Substring match: both skills contain "rev" (review-pr, cross-review).
     typeMessage("/rev");
-    // The query narrows the list to the prefix match only.
+    expect(screen.getByTestId("slash-menu-item-review-pr")).toBeTruthy();
+    expect(screen.getByTestId("slash-menu-item-cross-review")).toBeTruthy();
+    // A more specific substring narrows to one.
+    typeMessage("/pr");
     expect(screen.getByTestId("slash-menu-item-review-pr")).toBeTruthy();
     expect(screen.queryByTestId("slash-menu-item-cross-review")).toBeNull();
     fireEvent.click(screen.getByTestId("slash-menu-item-review-pr"));
-    // Selection fills "/name " (trailing space, caret ready for args) —
-    // skills never auto-submit from the menu.
+    // Selection fills "/name " (trailing space, caret ready for args).
     expect((screen.getByTestId("new-chat-landing-input") as HTMLTextAreaElement).value).toBe(
       "/review-pr ",
     );
@@ -1839,6 +1842,20 @@ describe("NewChatLandingScreen skills menu", () => {
     fireEvent.keyDown(screen.getByTestId("new-chat-landing-input"), { key: "Tab" });
     // The first match is pre-selected on open, so Tab completes it without
     // arrowing down first (same UX as the in-session composer).
+    expect((screen.getByTestId("new-chat-landing-input") as HTMLTextAreaElement).value).toBe(
+      "/review-pr ",
+    );
+  });
+
+  it("Tab completes a match found only mid-name (exercises slashMenuMatches, not just the render filter)", () => {
+    mockAgents([skilledAgent()]);
+    renderLanding();
+    // "pr" is a substring of "review-pr" but a prefix of no command. Tab
+    // completion reads slashMenuMatches/slashMenuIndex, so this only
+    // completes if the keyboard-nav filter is substring-based — guarding it
+    // from reverting to prefix matching and diverging from the rendered list.
+    typeMessage("/pr");
+    fireEvent.keyDown(screen.getByTestId("new-chat-landing-input"), { key: "Tab" });
     expect((screen.getByTestId("new-chat-landing-input") as HTMLTextAreaElement).value).toBe(
       "/review-pr ",
     );

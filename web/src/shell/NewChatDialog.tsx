@@ -67,7 +67,11 @@ import { isImeCompositionKeyEvent } from "@/lib/ime";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { sandboxOptionLabel } from "@/lib/capabilities";
-import { isSlashCommandText, SlashCommandMenu } from "@/components/SlashCommandMenu";
+import {
+  isSlashCommandText,
+  rankedSlashCommandNames,
+  SlashCommandMenu,
+} from "@/components/SlashCommandMenu";
 import { setPendingInitialPrompt } from "@/store/chatStore";
 import { appendPromptHistoryEntry } from "@/hooks/usePromptHistory";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
@@ -2677,9 +2681,7 @@ export function NewChatLandingScreen() {
   // Kept in sync with what SlashCommandMenu renders so keyboard nav
   // indexes into the same list.
   const slashMenuMatches = slashMenuOpen
-    ? Object.keys(skillCommands).filter((name) =>
-        name.slice(1).startsWith(slashMenuQuery.toLowerCase()),
-      )
+    ? rankedSlashCommandNames(skillCommands, slashMenuQuery)
     : [];
   // Pre-select the first match whenever the filtered list changes, so
   // Tab/Enter complete the top item without arrowing down first (same
