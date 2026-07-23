@@ -3216,6 +3216,19 @@ def _assert_server_port_bindable(host: str, port: int) -> None:
         "ignored with a warning if an admin already exists."
     ),
 )
+@click.option(
+    "--background",
+    "background",
+    is_flag=True,
+    default=False,
+    help=(
+        "Spawn the server as a detached background process (the managed "
+        "local server recorded in ~/.omnigent/local_server.pid) instead of "
+        "running it in the foreground. Reuses a healthy background server if "
+        "one is already up; otherwise spawns a detached one on a free "
+        "loopback port and prints its URL."
+    ),
+)
 @click.pass_context
 def server(
     ctx: click.Context,
@@ -3229,13 +3242,16 @@ def server(
     agent_dirs: tuple[str, ...],
     auto_open: bool,
     admin_password: str | None,
+    background: bool,
 ) -> None:
-    """Start the Omnigent server in the foreground, or manage the background server.
+    """Start the Omnigent server, or manage the background server.
 
     Bare ``omnigent server`` runs the server in the FOREGROUND (Ctrl-C to
-    stop) — for deploys / Docker. Subcommands manage the detached background
-    server that ``run`` / ``claude`` / ``codex`` use: ``start`` (ensure it's
-    up), ``stop`` (stop it and the local host daemon), ``status`` (is it up?).
+    stop) — for deploys / Docker. Pass ``--background`` to spawn it as a
+    detached background process instead (the managed local server that
+    ``run`` / ``claude`` / ``codex`` reuse). Subcommands manage that
+    background server: ``stop`` (stop it and the local host daemon),
+    ``status`` (is it up?).
 
     :param host: Interface to bind, e.g. ``"127.0.0.1"``.
     :param ctx: Click invocation context used to tell whether
@@ -3259,12 +3275,36 @@ def server(
         from ``--admin-password``, e.g. ``"hunter2"``. Folded into the
         ``OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD`` env var that
         bootstrap reads; ``None`` leaves the env var untouched.
+    :param background: When True, spawn the server as a detached background
+        process (the managed local server) instead of running it in the
+        foreground.
     :returns: None.
     """
     if ctx.invoked_subcommand is not None:
-        # A subcommand (start/stop/status) handles this invocation; the body
-        # below is the foreground-server path for the bare ``server`` group.
+        # A subcommand (stop/status) handles this invocation; the body
+        # below is the server path for the bare ``server`` group.
         return
+
+    if background:
+        # `omnigent server --background` replaces the removed `server start`
+        # subcommand: ensure (or reuse) the managed detached local server and
+        # return immediately instead of running uvicorn in-process.
+        startup = ensure_local_omnigent_server()
+        verb = (
+            "Started background server at"
+            if startup.spawned
+            else "Background server already running at"
+        )
+        click.echo(f"{verb} {startup.url}")
+        # Surface the exact log file so a detached server isn't a black box —
+        # `server --background` is otherwise the only signal it ever emits.
+        # Known for a spawned server and (via the log-path sidecar) for a
+        # reused one too; absent only for a foreground `omnigent server` whose
+        # logs stream to its own terminal.
+        if startup.log_path is not None:
+            click.echo(f"  log: {_display_path(startup.log_path)}")
+        return
+
     port_source = ctx.get_parameter_source("port")
     port_was_explicit = port_source is click.core.ParameterSource.COMMANDLINE
     if port_was_explicit:
@@ -3710,33 +3750,6 @@ def _stop_local_server_and_daemon(*, force: bool) -> bool:
     # running" while one was still listening on the default port).
     orphan_pid = stop_untracked_local_server()
     return was_running or orphan_pid is not None
-
-
-@server.command("start")
-def server_start() -> None:
-    """Ensure the managed background Omnigent server is running.
-
-    Reuses a healthy background server if one is already up (started here or
-    by a prior ``run`` / ``host``); otherwise spawns a detached one on a
-    free loopback port and prints its URL. The background counterpart to the
-    foreground bare ``omnigent server``.
-
-    :returns: None.
-    """
-    startup = ensure_local_omnigent_server()
-    verb = (
-        "Started background server at"
-        if startup.spawned
-        else "Background server already running at"
-    )
-    click.echo(f"{verb} {startup.url}")
-    # Surface the exact log file so a detached server isn't a black box —
-    # `server start` is otherwise the only signal it ever emits. Known for a
-    # spawned server and (via the log-path sidecar) for a reused one too;
-    # absent only for a foreground `omnigent server` whose logs stream to
-    # its own terminal.
-    if startup.log_path is not None:
-        click.echo(f"  log: {_display_path(startup.log_path)}")
 
 
 @server.command("stop")
